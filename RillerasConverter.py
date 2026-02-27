@@ -9,6 +9,20 @@ import img2pdf
 from docx2pdf import convert as docx2pdf_convert
 from PIL import Image
 
+
+class _NullStream:
+    def write(self, _):
+        return 0
+
+    def flush(self):
+        return None
+
+
+if sys.stdout is None:
+    sys.stdout = _NullStream()
+if sys.stderr is None:
+    sys.stderr = _NullStream()
+
 # Optional drag & drop
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -37,6 +51,11 @@ def app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent
+
+def resource_path(name: str) -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(getattr(sys, "_MEIPASS")) / name
+    return Path(__file__).resolve().with_name(name)
 
 SETTINGS_FILE = app_dir() / "settings.json"
 
@@ -593,7 +612,7 @@ BaseTk = TkinterDnD.Tk if HAS_DND else tk.Tk
 class App(BaseTk):
     def __init__(self):
         super().__init__()
-        icon_path = Path(__file__).with_name("convert.ico")
+        icon_path = resource_path("convert.ico")
         if icon_path.exists():
             self.iconbitmap(default=str(icon_path))
         self.title("Rilleras Converter PRO")

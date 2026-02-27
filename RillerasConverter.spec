@@ -5,7 +5,7 @@ a = Analysis(
     ['e:\\source\\Python Projects\\RillerasConverter.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('convert.ico', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -33,6 +33,7 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
+    icon='convert.ico',
     codesign_identity=None,
     entitlements_file=None,
 )
