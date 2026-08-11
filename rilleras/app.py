@@ -1,0 +1,1157 @@
+"""The Rilleras Converter desktop UI."""
+
+from __future__ import annotations
+
+import queue
+import threading
+import traceback
+from datetime import datetime
+from pathlib import Path
+
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+from . import __version__, core
+from .core import (
+    IMAGE_EXTS, OUT_IMAGE_FORMATS, PRESETS, Cancelled, ConversionError,
+)
+from .modes import (
+    GROUP_BATCH, GROUP_IMAGE, GROUP_MAIN, GROUP_PDF, GROUP_TITLES,
+    IN_DOCX, IN_FOLDER, IN_IMAGE_OR_FOLDER, IN_NONE, IN_PDF, MODES,
+    OPT_COMPRESS, OPT_IMAGE_OUT, OPT_MERGE, OPT_PAGES, OPT_RECURSIVE,
+    OPT_RENDER, OPT_ROTATE, OPT_SORT, OPT_SPLIT,
+    OUT_DOCX, OUT_FOLDER, OUT_IMAGE, OUT_IMAGE_OR_FOLDER, OUT_PDF, OUT_TXT,
+    group_of, modes_in_group,
+)
+from .settings import load_settings, resource_path, save_settings, app_dir
+from .theme import (
+    C, Card, F_H1, F_MONO, F_SMALL, F_TINY, ModeCard, NavButton,
+    ScrollFrame, StatusPill, apply_theme,
+)
+
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    HAS_DND = True
+except Exception:
+    HAS_DND = False
+
+BaseTk = TkinterDnD.Tk if HAS_DND else tk.Tk
+
+IMAGE_FILETYPES = [("Images", "*.jpg *.jpeg *.png *.webp *.tif *.tiff *.bmp")]
+
+
+def log_time() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+class App(BaseTk):
+    def __init__(self):
+        super().__init__()
+
+        self.title(f"Rilleras Converter {__version__}")
+        self.geometry("1120x780")
+        self.minsize(980, 660)
+        icon = resource_path("convert.ico")
+        if icon.exists():
+            try:
+                self.iconbitmap(default=str(icon))
+            except tk.TclError:
+                pass
+
+        apply_theme(self)
+
+        self.ui_queue: queue.Queue = queue.Queue()
+        self.cancel_event = threading.Event()
+        self.worker_thread: threading.Thread | None = None
+
+        self._settings = load_settings()
+        self._init_vars()
+
+        self.merge_list: list[Path] = []
+        self._mode_cards: dict[str, ModeCard] = {}
+        self._nav_buttons: dict[str, NavButton] = {}
+        self._current_view = ""
+        self._current_group = group_of(self.mode_var.get())
+
+        self._build_ui()
+        self._select_view(self._current_group)
+        self._on_mode_changed(persist=False)
+        self._refresh_recent_inputs_ui()
+        self._poll_queue()
+
+        if HAS_DND:
+            self._enable_dnd()
+
+        self._log("Rilleras Converter ready.", kind="ok")
+        if not HAS_DND:
+            self._log("Drag & drop unavailable (tkinterdnd2 not installed).", kind="muted")
+
+    # ------------------------------------------------------------- state --
+
+    def _init_vars(self):
+        s = self._settings
+        self.preset_var = tk.StringVar(value=s["last_preset"])
+        self.mode_var = tk.StringVar(value=s["last_mode"] if s["last_mode"] in MODES else "pdf_to_word")
+        self.in_path = tk.StringVar()
+        self.out_path = tk.StringVar()
+
+        self.dpi_var = tk.StringVar(value=str(s["dpi"]))
+        self.fmt_var = tk.StringVar(value=str(s["fmt"]))
+        self.jpg_quality_var = tk.IntVar(value=int(s["jpg_quality"]))
+        self.page_range_var = tk.StringVar(value=str(s["page_range"]))
+        self.recursive_var = tk.BooleanVar(value=bool(s["recursive"]))
+        self.sort_mode_var = tk.StringVar(value=str(s["sort_mode"]))
+
+        self.batch_img_fmt_var = tk.StringVar(value=str(s.get("batch_img_fmt", "jpg")))
+        self.resize_max_var = tk.StringVar(value=str(s.get("resize_max", "1600")))
+        self.resize_quality_var = tk.StringVar(value=str(s.get("resize_quality", "80")))
+
+        self.rotate_deg_var = tk.IntVar(value=int(s.get("rotate_deg", 90)))
+        self.split_mode_var = tk.StringVar(value=str(s.get("split_mode", "each")))
+        self.split_ranges_var = tk.StringVar(value=str(s.get("split_ranges", "1-3,4-7")))
+        self.compress_mode_var = tk.StringVar(value=str(s.get("compress_mode", "clean")))
+        self.compress_dpi_var = tk.StringVar(value=str(s.get("compress_dpi", "150")))
+
+        self.remember_paths_var = tk.BooleanVar(value=bool(s.get("remember_paths", True)))
+        self.open_output_after_run_var = tk.BooleanVar(value=bool(s.get("open_output_after_run", False)))
+        self.confirm_overwrite_var = tk.BooleanVar(value=bool(s.get("confirm_overwrite", True)))
+
+        self.recent_inputs = list(s.get("recent_inputs", []))
+        self.recent_max = int(s.get("recent_max", 10) or 10)
+
+        if self.remember_paths_var.get():
+            self.in_path.set(s.get("last_in_path", ""))
+            self.out_path.set(s.get("last_out_path", ""))
+
+    # ---------------------------------------------------------------- UI --
+
+    def _build_ui(self):
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        self._build_header()
+
+        body = tk.Frame(self, bg=C.BG_DEEP)
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        self._build_sidebar(body)
+
+        self.content = tk.Frame(body, bg=C.BG)
+        self.content.grid(row=0, column=1, sticky="nsew")
+
+        self._build_convert_view()
+        self._build_settings_view()
+        self._build_log_view()
+        self._build_footer()
+
+    def _build_header(self):
+        head = tk.Frame(self, bg=C.BG_DEEP)
+        head.grid(row=0, column=0, sticky="ew")
+        head.columnconfigure(1, weight=1)
+
+        left = tk.Frame(head, bg=C.BG_DEEP)
+        left.grid(row=0, column=0, sticky="w", padx=(22, 0), pady=16)
+        tk.Label(left, text="Rilleras", bg=C.BG_DEEP, fg=C.TEXT, font=F_H1).pack(side="left")
+        tk.Label(left, text="Converter", bg=C.BG_DEEP, fg=C.ACCENT, font=F_H1).pack(side="left", padx=(6, 0))
+        tk.Label(left, text=f"v{__version__}", bg=C.BG_DEEP, fg=C.TEXT_MUTED,
+                 font=F_TINY).pack(side="left", padx=(10, 0), pady=(6, 0))
+
+        right = tk.Frame(head, bg=C.BG_DEEP)
+        right.grid(row=0, column=2, sticky="e", padx=(0, 22), pady=16)
+        tk.Label(right, text="Quality preset", bg=C.BG_DEEP, fg=C.TEXT_MUTED,
+                 font=F_SMALL).pack(side="left", padx=(0, 9))
+        cb = ttk.Combobox(right, textvariable=self.preset_var, values=list(PRESETS.keys()),
+                          state="readonly", width=30)
+        cb.pack(side="left")
+        cb.bind("<<ComboboxSelected>>", lambda e: self._apply_preset(self.preset_var.get()))
+
+        tk.Frame(self, bg=C.BORDER_SOFT, height=1).grid(row=0, column=0, sticky="sew")
+
+    def _build_sidebar(self, parent):
+        bar = tk.Frame(parent, bg=C.BG_DEEP, width=212)
+        bar.grid(row=0, column=0, sticky="nsw")
+        bar.grid_propagate(False)
+
+        items = [
+            (GROUP_MAIN, "🔁", "Convert"),
+            (GROUP_PDF, "📕", "PDF Tools"),
+            (GROUP_IMAGE, "🎨", "Image Tools"),
+            (GROUP_BATCH, "📦", "Batch Word"),
+            ("settings", "⚙️", "Settings"),
+            ("log", "📋", "Activity Log"),
+        ]
+        tk.Frame(bar, bg=C.BG_DEEP, height=8).pack(fill="x")
+        for key, icon, label in items:
+            if key == "settings":
+                tk.Frame(bar, bg=C.BORDER_SOFT, height=1).pack(fill="x", padx=16, pady=10)
+            btn = NavButton(bar, icon, label, command=lambda k=key: self._select_view(k))
+            btn.pack(fill="x")
+            self._nav_buttons[key] = btn
+
+        foot = tk.Frame(bar, bg=C.BG_DEEP)
+        foot.pack(side="bottom", fill="x", pady=14, padx=16)
+        self.dnd_hint = tk.Label(
+            foot,
+            text="Drop a file anywhere\nto load it" if HAS_DND else "Drag & drop disabled",
+            bg=C.BG_DEEP, fg=C.TEXT_MUTED, font=F_TINY, justify="left", anchor="w",
+        )
+        self.dnd_hint.pack(anchor="w")
+
+        tk.Frame(parent, bg=C.BORDER_SOFT, width=1).grid(row=0, column=0, sticky="nse")
+
+    # ---- convert view (mode grid + files + options) ----
+
+    def _build_convert_view(self):
+        self.convert_view = ScrollFrame(self.content)
+        body = self.convert_view.body
+
+        # The subtitle is retitled per group; it must be non-empty here so that
+        # Card actually creates the label to write into later.
+        self.mode_panel = Card(body, "Choose a conversion", " ")
+        self.mode_panel.pack(fill="x", padx=24, pady=(20, 0))
+        self.mode_grid = tk.Frame(self.mode_panel.body, bg=C.SURFACE)
+        self.mode_grid.pack(fill="x")
+
+        self._build_files_card(body)
+        self._build_merge_card(body)
+        self._build_options_card(body)
+
+        tk.Frame(body, bg=C.BG, height=16).pack(fill="x")
+
+    def _build_files_card(self, parent):
+        self.files_card = Card(parent, "Files", "where to read from and write to")
+        self.files_card.pack(fill="x", padx=24, pady=(16, 0))
+        b = self.files_card.body
+        b.columnconfigure(1, weight=1)
+
+        # recent inputs
+        tk.Label(b, text="Recent", bg=C.SURFACE, fg=C.TEXT_MUTED, font=F_SMALL)\
+            .grid(row=0, column=0, sticky="w", pady=(0, 10))
+        self.recent_cb = ttk.Combobox(b, values=[], state="readonly")
+        self.recent_cb.grid(row=0, column=1, sticky="ew", padx=(14, 10), pady=(0, 10))
+        self.recent_cb.bind("<<ComboboxSelected>>", lambda e: self._choose_recent_input())
+        ttk.Button(b, text="Clear", style="Card.TButton", command=self._clear_recent_inputs)\
+            .grid(row=0, column=2, sticky="e", pady=(0, 10))
+
+        # input
+        self.lbl_in = tk.Label(b, text="Input", bg=C.SURFACE, fg=C.TEXT_DIM, font=F_SMALL, anchor="w")
+        self.lbl_in.grid(row=1, column=0, sticky="w", pady=6)
+        self.entry_in = ttk.Entry(b, textvariable=self.in_path)
+        self.entry_in.grid(row=1, column=1, sticky="ew", padx=(14, 10), pady=6)
+        self.btn_browse_in = ttk.Button(b, text="Browse…", style="Card.TButton",
+                                        command=self._browse_input)
+        self.btn_browse_in.grid(row=1, column=2, sticky="e", pady=6)
+
+        # output
+        self.lbl_out = tk.Label(b, text="Output", bg=C.SURFACE, fg=C.TEXT_DIM, font=F_SMALL, anchor="w")
+        self.lbl_out.grid(row=2, column=0, sticky="w", pady=6)
+        self.entry_out = ttk.Entry(b, textvariable=self.out_path)
+        self.entry_out.grid(row=2, column=1, sticky="ew", padx=(14, 10), pady=6)
+        ttk.Button(b, text="Browse…", style="Card.TButton", command=self._browse_output)\
+            .grid(row=2, column=2, sticky="e", pady=6)
+
+        self.mode_hint = tk.Label(b, text="", bg=C.SURFACE, fg=C.TEXT_MUTED,
+                                  font=F_TINY, anchor="w", justify="left")
+        self.mode_hint.grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 0))
+
+        self.word_badge = tk.Label(b, text="  ⚠  Requires Microsoft Word installed on this PC  ",
+                                   bg="#2A2418", fg=C.WARN, font=F_TINY, anchor="w")
+        # gridded on demand by _on_mode_changed
+        self._word_badge_row = 4
+
+    def _build_merge_card(self, parent):
+        self.merge_card = Card(parent, "Merge list", "files are merged top to bottom")
+        b = self.merge_card.body
+
+        btns = tk.Frame(b, bg=C.SURFACE)
+        btns.pack(fill="x", pady=(0, 10))
+        ttk.Button(btns, text="Add PDFs…", style="Card.TButton", command=self._merge_add).pack(side="left")
+        ttk.Button(btns, text="Move up", style="Card.TButton",
+                   command=lambda: self._merge_move(-1)).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Move down", style="Card.TButton",
+                   command=lambda: self._merge_move(1)).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Remove", style="Card.TButton", command=self._merge_remove).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Clear", style="Card.TButton", command=self._merge_clear).pack(side="left", padx=(8, 0))
+
+        self.merge_box = tk.Listbox(
+            b, height=7, bg=C.SURFACE_2, fg=C.TEXT, font=F_SMALL,
+            selectbackground=C.ACCENT_DEEP, selectforeground="#FFFFFF",
+            highlightthickness=1, highlightbackground=C.BORDER, highlightcolor=C.ACCENT,
+            bd=0, activestyle="none",
+        )
+        self.merge_box.pack(fill="x")
+
+    def _build_options_card(self, parent):
+        self.options_card = Card(parent, "Options", "only what applies to this conversion")
+        b = self.options_card.body
+        self._option_rows: dict[str, tk.Frame] = {}
+
+        def row(key: str) -> tk.Frame:
+            f = tk.Frame(b, bg=C.SURFACE)
+            self._option_rows[key] = f
+            return f
+
+        def label(parent_, text: str):
+            return tk.Label(parent_, text=text, bg=C.SURFACE, fg=C.TEXT_MUTED, font=F_SMALL)
+
+        # render: dpi / format / quality
+        r = row(OPT_RENDER)
+        label(r, "DPI").pack(side="left")
+        ttk.Entry(r, textvariable=self.dpi_var, width=7).pack(side="left", padx=(10, 22))
+        label(r, "Format").pack(side="left")
+        ttk.Combobox(r, textvariable=self.fmt_var, values=["png", "jpg"],
+                     state="readonly", width=6).pack(side="left", padx=(10, 22))
+        label(r, "JPG quality").pack(side="left")
+        self.quality_value = tk.Label(r, text=str(self.jpg_quality_var.get()),
+                                      bg=C.SURFACE, fg=C.ACCENT, font=F_SMALL, width=3)
+        self.quality_value.pack(side="right")
+        ttk.Scale(r, from_=50, to=95, orient="horizontal", variable=self.jpg_quality_var,
+                  command=self._on_quality_slide).pack(side="left", padx=(10, 10), fill="x", expand=True)
+
+        # page range
+        r = row(OPT_PAGES)
+        label(r, "Pages").pack(side="left")
+        ttk.Entry(r, textvariable=self.page_range_var, width=22).pack(side="left", padx=(10, 12))
+        tk.Label(r, text="all,  or  1-3,7,10-", bg=C.SURFACE, fg=C.TEXT_MUTED,
+                 font=F_TINY).pack(side="left")
+
+        # recursive
+        r = row(OPT_RECURSIVE)
+        ttk.Checkbutton(r, text="Include images in subfolders", variable=self.recursive_var)\
+            .pack(side="left")
+
+        # sort
+        r = row(OPT_SORT)
+        label(r, "Page order").pack(side="left")
+        ttk.Combobox(r, textvariable=self.sort_mode_var, values=["natural", "name", "mtime"],
+                     state="readonly", width=12).pack(side="left", padx=(10, 12))
+        tk.Label(r, text="natural puts page2 before page10", bg=C.SURFACE,
+                 fg=C.TEXT_MUTED, font=F_TINY).pack(side="left")
+
+        # image output
+        r = row(OPT_IMAGE_OUT)
+        label(r, "Save as").pack(side="left")
+        ttk.Combobox(r, textvariable=self.batch_img_fmt_var, values=OUT_IMAGE_FORMATS,
+                     state="readonly", width=7).pack(side="left", padx=(10, 22))
+        label(r, "Max size (px)").pack(side="left")
+        ttk.Entry(r, textvariable=self.resize_max_var, width=8).pack(side="left", padx=(10, 22))
+        label(r, "Quality").pack(side="left")
+        ttk.Entry(r, textvariable=self.resize_quality_var, width=6).pack(side="left", padx=(10, 0))
+
+        # rotate
+        r = row(OPT_ROTATE)
+        label(r, "Rotate by").pack(side="left")
+        ttk.Combobox(r, textvariable=self.rotate_deg_var, values=[90, 180, 270],
+                     state="readonly", width=6).pack(side="left", padx=(10, 8))
+        tk.Label(r, text="degrees clockwise", bg=C.SURFACE, fg=C.TEXT_MUTED,
+                 font=F_TINY).pack(side="left")
+
+        # split
+        r = row(OPT_SPLIT)
+        label(r, "Split").pack(side="left")
+        ttk.Combobox(r, textvariable=self.split_mode_var, values=["each", "ranges"],
+                     state="readonly", width=9).pack(side="left", padx=(10, 22))
+        label(r, "Ranges").pack(side="left")
+        ttk.Entry(r, textvariable=self.split_ranges_var, width=30).pack(side="left", padx=(10, 12))
+        tk.Label(r, text="used when split = ranges", bg=C.SURFACE, fg=C.TEXT_MUTED,
+                 font=F_TINY).pack(side="left")
+
+        # compress
+        r = row(OPT_COMPRESS)
+        label(r, "Method").pack(side="left")
+        ttk.Combobox(r, textvariable=self.compress_mode_var, values=["clean", "rebuild"],
+                     state="readonly", width=9).pack(side="left", padx=(10, 22))
+        label(r, "Rebuild DPI").pack(side="left")
+        ttk.Entry(r, textvariable=self.compress_dpi_var, width=8).pack(side="left", padx=(10, 12))
+        tk.Label(r, text="clean is lossless; rebuild re-renders pages",
+                 bg=C.SURFACE, fg=C.TEXT_MUTED, font=F_TINY).pack(side="left")
+
+    # ---- settings view ----
+
+    def _build_settings_view(self):
+        self.settings_view = ScrollFrame(self.content)
+        body = self.settings_view.body
+
+        card = Card(body, "Behaviour", "")
+        card.pack(fill="x", padx=24, pady=(20, 0))
+        b = card.body
+
+        for text, var in [
+            ("Remember the last input and output paths between runs", self.remember_paths_var),
+            ("Open the output folder automatically when a job finishes", self.open_output_after_run_var),
+            ("Ask before overwriting existing files", self.confirm_overwrite_var),
+        ]:
+            ttk.Checkbutton(b, text=text, variable=var, command=self._persist_settings)\
+                .pack(anchor="w", pady=5)
+
+        card2 = Card(body, "Storage", "")
+        card2.pack(fill="x", padx=24, pady=(16, 0))
+        b2 = card2.body
+        tk.Label(b2, text=f"Settings file: {app_dir() / 'settings.json'}", bg=C.SURFACE,
+                 fg=C.TEXT_MUTED, font=F_TINY, anchor="w", justify="left").pack(anchor="w", pady=(0, 10))
+        ttk.Button(b2, text="Open settings folder", style="Card.TButton",
+                   command=lambda: core.open_in_explorer(app_dir())).pack(anchor="w")
+
+        card3 = Card(body, "About", "")
+        card3.pack(fill="x", padx=24, pady=(16, 20))
+        b3 = card3.body
+        dnd = "enabled" if HAS_DND else "not installed (pip install tkinterdnd2)"
+        for line in [
+            f"Rilleras Converter {__version__}",
+            f"Drag & drop: {dnd}",
+            "Word conversions drive Microsoft Word and need it installed.",
+            "PDF → Word uses pdf2docx and keeps the page layout.",
+        ]:
+            tk.Label(b3, text=line, bg=C.SURFACE, fg=C.TEXT_DIM, font=F_SMALL,
+                     anchor="w", justify="left").pack(anchor="w", pady=2)
+
+    # ---- log view ----
+
+    def _build_log_view(self):
+        self.log_view = tk.Frame(self.content, bg=C.BG)
+
+        card = Card(self.log_view, "Activity log", "")
+        card.pack(fill="both", expand=True, padx=24, pady=20)
+        b = card.body
+
+        bar = tk.Frame(b, bg=C.SURFACE)
+        bar.pack(fill="x", pady=(0, 10))
+        ttk.Button(bar, text="Clear", style="Card.TButton", command=self._clear_log).pack(side="left")
+        ttk.Button(bar, text="Copy all", style="Card.TButton", command=self._copy_log).pack(side="left", padx=(8, 0))
+
+        wrap = tk.Frame(b, bg=C.SURFACE_2, highlightthickness=1,
+                        highlightbackground=C.BORDER, bd=0)
+        wrap.pack(fill="both", expand=True)
+
+        self.log = tk.Text(wrap, wrap="word", bg=C.SURFACE_2, fg=C.TEXT_DIM,
+                           insertbackground=C.ACCENT, font=F_MONO,
+                           relief="flat", padx=12, pady=10, height=18)
+        scroll = ttk.Scrollbar(wrap, orient="vertical", command=self.log.yview,
+                               style="Vertical.TScrollbar")
+        self.log.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.log.pack(side="left", fill="both", expand=True)
+
+        self.log.tag_configure("time", foreground=C.TEXT_MUTED)
+        self.log.tag_configure("info", foreground=C.TEXT_DIM)
+        self.log.tag_configure("ok", foreground=C.SUCCESS)
+        self.log.tag_configure("err", foreground=C.DANGER)
+        self.log.tag_configure("muted", foreground=C.TEXT_MUTED)
+        self.log.configure(state="disabled")
+
+    # ---- footer ----
+
+    def _build_footer(self):
+        self.progress = ttk.Progressbar(self, mode="determinate",
+                                        style="Accent.Horizontal.TProgressbar")
+        self.progress.grid(row=2, column=0, sticky="ew")
+
+        foot = tk.Frame(self, bg=C.BG_DEEP)
+        foot.grid(row=3, column=0, sticky="ew")
+        foot.columnconfigure(1, weight=1)
+
+        self.status = StatusPill(foot)
+        self.status.grid(row=0, column=0, sticky="w", padx=(22, 0), pady=14)
+
+        self.detail = tk.Label(foot, text="", bg=C.BG_DEEP, fg=C.TEXT_MUTED, font=F_SMALL)
+        self.detail.grid(row=0, column=1, sticky="w", padx=(12, 0), pady=14)
+
+        right = tk.Frame(foot, bg=C.BG_DEEP)
+        right.grid(row=0, column=2, sticky="e", padx=(0, 22), pady=14)
+
+        self.btn_open = ttk.Button(right, text="Open output", command=self._open_output,
+                                   state="disabled")
+        self.btn_open.pack(side="left", padx=(0, 10))
+        self.btn_cancel = ttk.Button(right, text="Cancel", command=self._cancel, state="disabled")
+        self.btn_cancel.pack(side="left", padx=(0, 10))
+        self.btn_run = ttk.Button(right, text="Run conversion", style="Accent.TButton",
+                                  command=self._run)
+        self.btn_run.pack(side="left")
+
+    # ------------------------------------------------------ view switching --
+
+    def _select_view(self, key: str):
+        for name, btn in self._nav_buttons.items():
+            btn.set_active(name == key)
+
+        for view in (self.convert_view, self.settings_view, self.log_view):
+            view.pack_forget()
+
+        if key in (GROUP_MAIN, GROUP_PDF, GROUP_IMAGE, GROUP_BATCH):
+            self._current_group = key
+            self._rebuild_mode_grid(key)
+            if group_of(self.mode_var.get()) != key:
+                self.mode_var.set(modes_in_group(key)[0].key)
+                self._on_mode_changed()
+            else:
+                self._sync_mode_selection()
+            self.convert_view.pack(fill="both", expand=True)
+        elif key == "settings":
+            self.settings_view.pack(fill="both", expand=True)
+        else:
+            self.log_view.pack(fill="both", expand=True)
+
+        self._current_view = key
+
+    def _rebuild_mode_grid(self, group: str):
+        for child in self.mode_grid.winfo_children():
+            child.destroy()
+        self._mode_cards.clear()
+
+        title, subtitle = GROUP_TITLES[group]
+        self._set_panel_heading(title, subtitle)
+
+        cols = 3
+        for i in range(cols):
+            self.mode_grid.columnconfigure(i, weight=1, uniform="modes")
+
+        for idx, spec in enumerate(modes_in_group(group)):
+            card = ModeCard(self.mode_grid, spec, command=self._on_mode_card_clicked)
+            card.grid(row=idx // cols, column=idx % cols, sticky="nsew",
+                      padx=(0 if idx % cols == 0 else 6, 0), pady=(0, 8))
+            self._mode_cards[spec.key] = card
+
+        self._sync_mode_selection()
+
+    def _set_panel_heading(self, title: str, subtitle: str):
+        # Card builds its header lazily; find the labels and retitle them.
+        header = self.mode_panel.winfo_children()[0]
+        labels = [w for w in header.winfo_children() if isinstance(w, tk.Label)]
+        if labels:
+            labels[0].configure(text=title)
+        if len(labels) > 1:
+            labels[1].configure(text=subtitle)
+
+    def _sync_mode_selection(self):
+        current = self.mode_var.get()
+        for key, card in self._mode_cards.items():
+            card.set_selected(key == current)
+
+    def _on_mode_card_clicked(self, key: str):
+        if self.mode_var.get() != key:
+            self.mode_var.set(key)
+        self._on_mode_changed()
+
+    def _on_mode_changed(self, persist: bool = True):
+        spec = MODES[self.mode_var.get()]
+        self._sync_mode_selection()
+
+        self.lbl_in.configure(text="Input")
+        self.lbl_out.configure(text="Output")
+        self.mode_hint.configure(
+            text=f"{spec.input_label}   →   {spec.output_label}"
+        )
+
+        # input row is meaningless for merge
+        show_input = spec.input_kind != IN_NONE
+        state = "normal" if show_input else "disabled"
+        self.entry_in.configure(state=state)
+        self.btn_browse_in.configure(state=state)
+        self.lbl_in.configure(fg=C.TEXT_DIM if show_input else C.TEXT_MUTED)
+
+        if spec.requires_word:
+            self.word_badge.grid(row=self._word_badge_row, column=0, columnspan=3,
+                                 sticky="w", pady=(10, 0))
+        else:
+            self.word_badge.grid_remove()
+
+        # option rows
+        for key, frame in self._option_rows.items():
+            frame.pack_forget()
+        wanted = [k for k in (OPT_RENDER, OPT_PAGES, OPT_IMAGE_OUT, OPT_SORT,
+                              OPT_RECURSIVE, OPT_ROTATE, OPT_SPLIT, OPT_COMPRESS)
+                  if k in spec.options]
+        for key in wanted:
+            self._option_rows[key].pack(fill="x", pady=7)
+
+        # Re-pack both cards in order so the merge list always sits above options.
+        self.merge_card.pack_forget()
+        self.options_card.pack_forget()
+        if OPT_MERGE in spec.options:
+            self.merge_card.pack(fill="x", padx=24, pady=(16, 0))
+        if wanted:
+            self.options_card.pack(fill="x", padx=24, pady=(16, 0))
+
+        if persist:
+            self._persist_settings()
+
+    def _on_quality_slide(self, _value=None):
+        self.quality_value.configure(text=str(int(self.jpg_quality_var.get())))
+
+    # ----------------------------------------------------------- dnd/recent --
+
+    def _enable_dnd(self):
+        def on_drop(event):
+            paths = self._parse_dnd_files(event.data)
+            if not paths:
+                return
+            p = Path(paths[0])
+            self.in_path.set(str(p))
+            self._add_recent_input(p)
+
+            suggestion = None
+            if p.is_dir():
+                suggestion = "images_to_pdf"
+            else:
+                ext = p.suffix.lower()
+                if ext in core.DOCX_EXTS:
+                    suggestion = "word_to_pdf"
+                elif ext in core.PDF_EXTS:
+                    suggestion = "pdf_to_word"
+                elif ext in IMAGE_EXTS:
+                    suggestion = "image_to_image"
+
+            if suggestion:
+                self.mode_var.set(suggestion)
+                self._select_view(group_of(suggestion))
+                self._on_mode_changed()
+            self._log(f"Loaded: {p}", kind="info")
+
+        self.drop_target_register(DND_FILES)
+        self.dnd_bind("<<Drop>>", on_drop)
+
+    def _parse_dnd_files(self, data: str) -> list[str]:
+        parts, buf, in_brace = [], "", False
+        for ch in data:
+            if ch == "{":
+                in_brace, buf = True, ""
+            elif ch == "}":
+                in_brace = False
+                parts.append(buf)
+                buf = ""
+            elif ch == " " and not in_brace:
+                if buf:
+                    parts.append(buf)
+                    buf = ""
+            else:
+                buf += ch
+        if buf:
+            parts.append(buf)
+        return [p.strip() for p in parts if p.strip()]
+
+    def _refresh_recent_inputs_ui(self):
+        self.recent_cb["values"] = self.recent_inputs
+
+    def _add_recent_input(self, p: Path):
+        sp = str(p)
+        self.recent_inputs = [x for x in self.recent_inputs if x != sp]
+        self.recent_inputs.insert(0, sp)
+        self.recent_inputs = self.recent_inputs[: max(1, self.recent_max)]
+        self._refresh_recent_inputs_ui()
+        self._persist_settings()
+
+    def _choose_recent_input(self):
+        chosen = self.recent_cb.get()
+        if chosen:
+            self.in_path.set(chosen)
+
+    def _clear_recent_inputs(self):
+        self.recent_inputs = []
+        self._refresh_recent_inputs_ui()
+        self.recent_cb.set("")
+        self._persist_settings()
+
+    # ------------------------------------------------------------ presets --
+
+    def _apply_preset(self, name: str):
+        p = PRESETS.get(name)
+        if not p:
+            return
+        self.dpi_var.set(str(p["dpi"]))
+        self.fmt_var.set(p["fmt"])
+        self.jpg_quality_var.set(int(p["jpg_quality"]))
+        self._on_quality_slide()
+        self._log(f"Preset applied: {name}", kind="muted")
+        self._persist_settings()
+
+    def _persist_settings(self):
+        remember = bool(self.remember_paths_var.get())
+        data = dict(
+            remember_paths=remember,
+            open_output_after_run=bool(self.open_output_after_run_var.get()),
+            confirm_overwrite=bool(self.confirm_overwrite_var.get()),
+            recent_inputs=list(self.recent_inputs),
+            recent_max=int(self.recent_max),
+
+            last_mode=self.mode_var.get(),
+            last_preset=self.preset_var.get(),
+
+            dpi=self.dpi_var.get(),
+            fmt=self.fmt_var.get(),
+            jpg_quality=int(self.jpg_quality_var.get()),
+            page_range=self.page_range_var.get(),
+            recursive=bool(self.recursive_var.get()),
+            sort_mode=self.sort_mode_var.get(),
+
+            batch_img_fmt=self.batch_img_fmt_var.get(),
+            resize_max=self.resize_max_var.get(),
+            resize_quality=self.resize_quality_var.get(),
+
+            rotate_deg=int(self.rotate_deg_var.get()),
+            split_mode=self.split_mode_var.get(),
+            split_ranges=self.split_ranges_var.get(),
+            compress_mode=self.compress_mode_var.get(),
+            compress_dpi=self.compress_dpi_var.get(),
+
+            last_in_path=self.in_path.get() if remember else "",
+            last_out_path=self.out_path.get() if remember else "",
+        )
+        save_settings(data)
+
+    # -------------------------------------------------------- merge list --
+
+    def _merge_add(self):
+        files = filedialog.askopenfilenames(title="Select PDFs to merge",
+                                            filetypes=[("PDF", "*.pdf")])
+        for f in files:
+            p = Path(f)
+            if p.exists() and p.suffix.lower() == ".pdf":
+                self.merge_list.append(p)
+        self._merge_refresh()
+
+    def _merge_clear(self):
+        self.merge_list = []
+        self._merge_refresh()
+
+    def _merge_remove(self):
+        sel = list(self.merge_box.curselection())
+        for i in reversed(sel):
+            del self.merge_list[i]
+        self._merge_refresh()
+
+    def _merge_move(self, delta: int):
+        sel = list(self.merge_box.curselection())
+        if len(sel) != 1:
+            return
+        i = sel[0]
+        j = i + delta
+        if not (0 <= j < len(self.merge_list)):
+            return
+        self.merge_list[i], self.merge_list[j] = self.merge_list[j], self.merge_list[i]
+        self._merge_refresh()
+        self.merge_box.selection_set(j)
+
+    def _merge_refresh(self):
+        self.merge_box.delete(0, tk.END)
+        for p in self.merge_list:
+            self.merge_box.insert(tk.END, str(p))
+
+    # ---------------------------------------------------------- browsing --
+
+    def _initial_dir(self) -> str:
+        current = self.in_path.get().strip().strip('"')
+        if current:
+            p = Path(current)
+            candidate = p if p.is_dir() else p.parent
+            if candidate.exists():
+                return str(candidate)
+        return ""
+
+    def _browse_input(self):
+        spec = MODES[self.mode_var.get()]
+        initial = self._initial_dir()
+        p = ""
+
+        if spec.input_kind == IN_NONE:
+            messagebox.showinfo("Merge PDFs", "Use 'Add PDFs…' in the merge list below.")
+            return
+        if spec.input_kind == IN_DOCX:
+            p = filedialog.askopenfilename(title="Select Word document",
+                                           filetypes=[("Word", "*.docx")], initialdir=initial)
+        elif spec.input_kind == IN_PDF:
+            p = filedialog.askopenfilename(title="Select PDF",
+                                           filetypes=[("PDF", "*.pdf")], initialdir=initial)
+        elif spec.input_kind == IN_FOLDER:
+            p = filedialog.askdirectory(title="Select folder", initialdir=initial)
+        elif spec.input_kind == IN_IMAGE_OR_FOLDER:
+            use_folder = messagebox.askyesno(
+                "Choose input",
+                "Convert a whole folder?\n\nYes — pick a folder\nNo — pick a single image",
+            )
+            if use_folder:
+                p = filedialog.askdirectory(title="Select folder of images", initialdir=initial)
+            else:
+                p = filedialog.askopenfilename(title="Select image",
+                                               filetypes=IMAGE_FILETYPES, initialdir=initial)
+
+        if p:
+            self.in_path.set(p)
+            self._add_recent_input(Path(p))
+            self._persist_settings()
+
+    def _browse_output(self):
+        spec = MODES[self.mode_var.get()]
+        initial = self._initial_dir()
+        kind = spec.output_kind
+        p = ""
+
+        if kind == OUT_IMAGE_OR_FOLDER:
+            in_txt = self.in_path.get().strip().strip('"')
+            in_p = Path(in_txt) if in_txt else None
+            kind = OUT_FOLDER if (in_p and in_p.is_dir()) else OUT_IMAGE
+
+        if kind == OUT_FOLDER:
+            p = filedialog.askdirectory(title="Select output folder", initialdir=initial)
+        elif kind == OUT_PDF:
+            p = filedialog.asksaveasfilename(title="Save PDF as", defaultextension=".pdf",
+                                             filetypes=[("PDF", "*.pdf")], initialdir=initial)
+        elif kind == OUT_DOCX:
+            p = filedialog.asksaveasfilename(title="Save Word document as", defaultextension=".docx",
+                                             filetypes=[("Word", "*.docx")], initialdir=initial)
+        elif kind == OUT_TXT:
+            p = filedialog.asksaveasfilename(title="Save text file as", defaultextension=".txt",
+                                             filetypes=[("Text", "*.txt")], initialdir=initial)
+        elif kind == OUT_IMAGE:
+            if spec.key == "image_to_image":
+                ext = "." + self.batch_img_fmt_var.get().lower()
+                p = filedialog.asksaveasfilename(title="Save image as", defaultextension=ext,
+                                                 filetypes=[("Image", "*" + ext)], initialdir=initial)
+            else:
+                p = filedialog.asksaveasfilename(
+                    title="Save image as", defaultextension=".png",
+                    filetypes=[("PNG", "*.png"), ("JPG", "*.jpg")], initialdir=initial)
+
+        if p:
+            self.out_path.set(p)
+            self._persist_settings()
+
+    # ------------------------------------------------------------ logging --
+
+    def _log(self, msg: str, kind: str = "info"):
+        self.log.configure(state="normal")
+        self.log.insert("end", f"[{log_time()}] ", ("time",))
+        self.log.insert("end", msg + "\n", (kind,))
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _clear_log(self):
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
+
+    def _copy_log(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.log.get("1.0", "end").strip())
+        self._log("Log copied to clipboard.", kind="muted")
+
+    # ---------------------------------------------------------- run flow --
+
+    def _set_working(self, working: bool):
+        self.btn_run.config(state="disabled" if working else "normal")
+        self.btn_cancel.config(state="normal" if working else "disabled")
+        if working:
+            self.btn_open.config(state="disabled")
+
+    def _cancel(self):
+        self.cancel_event.set()
+        self._log("Cancel requested…", kind="muted")
+
+    def _open_output(self):
+        out = self.out_path.get().strip().strip('"')
+        if out:
+            core.open_in_explorer(Path(out))
+
+    def _resolve_paths(self):
+        """Validate the current selection and return (spec, in_path, out_path)."""
+        spec = MODES[self.mode_var.get()]
+        in_txt = self.in_path.get().strip().strip('"')
+        out_txt = self.out_path.get().strip().strip('"')
+
+        in_p: Path | None = None
+        if spec.input_kind == IN_NONE:
+            if not self.merge_list:
+                raise ConversionError("The merge list is empty — add some PDFs first.")
+        else:
+            if not in_txt:
+                raise ConversionError("Choose an input path.")
+            in_p = Path(in_txt)
+            if not in_p.exists():
+                raise ConversionError(f"Input path does not exist:\n{in_p}")
+            if spec.input_kind == IN_DOCX and in_p.suffix.lower() != ".docx":
+                raise ConversionError("Input must be a .docx file.")
+            if spec.input_kind == IN_PDF and in_p.suffix.lower() != ".pdf":
+                raise ConversionError("Input must be a .pdf file.")
+            if spec.input_kind == IN_FOLDER and not in_p.is_dir():
+                raise ConversionError("Input must be a folder.")
+
+        if not out_txt:
+            raise ConversionError("Choose an output path.")
+        out_p = Path(out_txt)
+
+        kind = spec.output_kind
+        if kind == OUT_IMAGE_OR_FOLDER:
+            kind = OUT_FOLDER if (in_p and in_p.is_dir()) else OUT_IMAGE
+
+        if kind == OUT_FOLDER:
+            if out_p.suffix:
+                raise ConversionError(
+                    f"This conversion writes many files, so the output must be a folder.\n"
+                    f"'{out_p.name}' looks like a file."
+                )
+        elif kind == OUT_PDF:
+            out_p = out_p.with_suffix(".pdf")
+        elif kind == OUT_DOCX:
+            out_p = out_p.with_suffix(".docx")
+        elif kind == OUT_TXT:
+            out_p = out_p.with_suffix(".txt")
+        elif kind == OUT_IMAGE:
+            if spec.key == "image_to_image":
+                want = "." + self.batch_img_fmt_var.get().lower()
+                if out_p.suffix.lower() != want:
+                    out_p = out_p.with_suffix(want)
+            elif out_p.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+                raise ConversionError("Output image must be .png or .jpg")
+
+        # numeric sanity for the options this mode actually uses
+        if OPT_RENDER in spec.options:
+            dpi = self._as_int(self.dpi_var.get(), "DPI")
+            if not (72 <= dpi <= 600):
+                raise ConversionError("DPI must be between 72 and 600.")
+            if self.fmt_var.get().lower() not in ("png", "jpg"):
+                raise ConversionError("Format must be png or jpg.")
+        if OPT_IMAGE_OUT in spec.options:
+            if self.batch_img_fmt_var.get().lower() not in OUT_IMAGE_FORMATS:
+                raise ConversionError(f"Choose an output format from: {', '.join(OUT_IMAGE_FORMATS)}")
+            self._as_int(self.resize_quality_var.get(), "Quality")
+            if self.resize_max_var.get().strip():
+                self._as_int(self.resize_max_var.get(), "Max size")
+        if OPT_COMPRESS in spec.options and self.compress_mode_var.get() == "rebuild":
+            self._as_int(self.compress_dpi_var.get(), "Rebuild DPI")
+
+        return spec, in_p, out_p
+
+    @staticmethod
+    def _as_int(text: str, field: str) -> int:
+        try:
+            return int(str(text).strip())
+        except ValueError as exc:
+            raise ConversionError(f"{field} must be a whole number (got '{text}').") from exc
+
+    def _confirm_overwrite(self, out_p: Path, is_folder_output: bool) -> bool:
+        if not self.confirm_overwrite_var.get():
+            return True
+        if is_folder_output:
+            if out_p.exists() and out_p.is_dir():
+                try:
+                    has_any = any(out_p.iterdir())
+                except Exception:
+                    has_any = True
+                if has_any:
+                    return messagebox.askyesno(
+                        "Folder is not empty",
+                        f"{out_p}\n\nExisting files with the same names will be replaced. Continue?")
+            return True
+        if out_p.exists() and out_p.is_file():
+            return messagebox.askyesno("Overwrite file?", f"{out_p}\n\nReplace this file?")
+        return True
+
+    def _run(self):
+        try:
+            spec, in_p, out_p = self._resolve_paths()
+        except ConversionError as e:
+            self.status.set_state("error", "Check settings")
+            self._log(str(e), kind="err")
+            messagebox.showerror("Cannot run", str(e))
+            return
+
+        folder_output = not out_p.suffix
+        if not self._confirm_overwrite(out_p, folder_output):
+            self.status.set_state("idle", "Cancelled")
+            return
+
+        self.out_path.set(str(out_p))
+        self.cancel_event.clear()
+        self.progress["value"] = 0
+        self.progress["maximum"] = 100
+        self.status.set_state("working", "Working…")
+        self.detail.configure(text=spec.title)
+        self._set_working(True)
+        self._persist_settings()
+        self._log(f"Starting: {spec.title}", kind="info")
+
+        params = self._snapshot_params(spec, in_p, out_p)
+        self.worker_thread = threading.Thread(target=self._worker, args=(params,), daemon=True)
+        self.worker_thread.start()
+
+    def _snapshot_params(self, spec, in_p, out_p) -> dict:
+        """Copy every Tk variable we need up front.
+
+        Tk variables must not be read from a background thread, so the worker
+        only ever sees this plain dict.
+        """
+        def num(text, default: int) -> int:
+            # Fields the current mode does not use are never validated, so they
+            # may hold anything; fall back rather than crashing the run.
+            try:
+                return int(str(text).strip())
+            except (TypeError, ValueError):
+                return default
+
+        return dict(
+            spec=spec,
+            in_p=in_p,
+            out_p=out_p,
+            merge_list=list(self.merge_list),
+            dpi=num(self.dpi_var.get(), 300),
+            fmt=self.fmt_var.get().lower(),
+            jpg_quality=int(self.jpg_quality_var.get()),
+            page_range=self.page_range_var.get().strip() or "all",
+            recursive=bool(self.recursive_var.get()),
+            sort_mode=self.sort_mode_var.get(),
+            img_fmt=self.batch_img_fmt_var.get().lower(),
+            resize_max=num(self.resize_max_var.get(), 0),
+            resize_quality=num(self.resize_quality_var.get(), 80),
+            rotate_deg=num(self.rotate_deg_var.get(), 90),
+            split_mode=self.split_mode_var.get(),
+            split_ranges=self.split_ranges_var.get(),
+            compress_mode=self.compress_mode_var.get(),
+            compress_dpi=num(self.compress_dpi_var.get(), 150),
+        )
+
+    def _worker(self, p: dict):
+        def progress_cb(done, total):
+            self.ui_queue.put(("progress", done, total))
+
+        def log_cb(m):
+            self.ui_queue.put(("log", m, "info"))
+
+        cb = dict(progress_cb=progress_cb, cancel_event=self.cancel_event, log_cb=log_cb)
+        spec, in_p, out_p = p["spec"], p["in_p"], p["out_p"]
+        key = spec.key
+
+        try:
+            if key == "pdf_to_word":
+                core.pdf_to_word(in_p, out_p, page_range=p["page_range"], **cb)
+
+            elif key == "word_to_pdf":
+                core.word_to_pdf(in_p, out_p, log_cb=log_cb)
+                progress_cb(1, 1)
+
+            elif key == "word_to_images":
+                core.word_to_images(in_p, out_p, p["dpi"], p["fmt"], p["jpg_quality"],
+                                    page_range=p["page_range"], **cb)
+
+            elif key == "pdf_to_images":
+                core.pdf_to_images(in_p, out_p, p["dpi"], p["fmt"], p["jpg_quality"],
+                                   page_range=p["page_range"], only_pages_with_images=False, **cb)
+
+            elif key == "pdf_to_images_only_img_pages":
+                core.pdf_to_images(in_p, out_p, p["dpi"], p["fmt"], p["jpg_quality"],
+                                   page_range=p["page_range"], only_pages_with_images=True, **cb)
+
+            elif key == "images_to_pdf":
+                core.images_to_pdf(in_p, out_p, recursive=p["recursive"],
+                                   sort_mode=p["sort_mode"], **cb)
+
+            elif key == "pdf_to_long_image":
+                out_fmt = "jpg" if out_p.suffix.lower() in (".jpg", ".jpeg") else "png"
+                core.pdf_to_long_image(in_p, out_p, p["dpi"], out_fmt, p["jpg_quality"],
+                                       page_range=p["page_range"], **cb)
+
+            elif key == "pdf_to_text":
+                core.pdf_to_text(in_p, out_p, page_range=p["page_range"], **cb)
+
+            elif key == "image_to_image":
+                core.image_to_image(in_p, out_p, p["img_fmt"], recursive=p["recursive"],
+                                    max_size=p["resize_max"] or None,
+                                    quality=p["resize_quality"], **cb)
+
+            elif key == "merge_pdfs":
+                core.merge_pdfs(p["merge_list"], out_p, **cb)
+
+            elif key == "split_pdf":
+                core.split_pdf(in_p, out_p, mode=p["split_mode"], ranges=p["split_ranges"], **cb)
+
+            elif key == "rotate_pdf":
+                core.rotate_pdf(in_p, out_p, p["rotate_deg"], page_range=p["page_range"], **cb)
+
+            elif key == "compress_pdf":
+                if p["compress_mode"] == "clean":
+                    core.compress_pdf_clean(in_p, out_p, log_cb=log_cb)
+                    progress_cb(1, 1)
+                else:
+                    core.compress_pdf_rebuild(in_p, out_p, p["compress_dpi"], **cb)
+
+            elif key == "batch_image_convert":
+                core.batch_image_convert(in_p, out_p, p["img_fmt"], recursive=p["recursive"], **cb)
+
+            elif key == "batch_image_resize":
+                core.batch_image_resize(in_p, out_p, p["img_fmt"], p["resize_max"] or 1600,
+                                        p["resize_quality"], recursive=p["recursive"], **cb)
+
+            elif key == "images_to_pdf_per_subfolder":
+                core.images_to_pdf_per_subfolder(in_p, out_p, recursive=p["recursive"],
+                                                 sort_mode=p["sort_mode"], **cb)
+
+            elif key == "batch_word_pdf":
+                core.batch_word_convert(in_p, out_p, "pdf", p["dpi"], p["fmt"], p["jpg_quality"], **cb)
+
+            elif key == "batch_word_images":
+                core.batch_word_convert(in_p, out_p, "images", p["dpi"], p["fmt"],
+                                        p["jpg_quality"], **cb)
+
+            else:
+                raise ConversionError(f"Unknown mode: {key}")
+
+            self.ui_queue.put(("done", str(out_p)))
+
+        except Cancelled:
+            self.ui_queue.put(("cancelled", ""))
+        except ConversionError as e:
+            self.ui_queue.put(("error", str(e)))
+        except Exception as e:
+            # Unexpected failures keep their traceback in the log, so a bad PDF
+            # is diagnosable instead of just "an error occurred".
+            self.ui_queue.put(("log", traceback.format_exc().rstrip(), "err"))
+            self.ui_queue.put(("error", f"{type(e).__name__}: {e}"))
+
+    def _poll_queue(self):
+        try:
+            while True:
+                msg = self.ui_queue.get_nowait()
+                tag = msg[0]
+
+                if tag == "log":
+                    self._log(msg[1], kind=msg[2] if len(msg) > 2 else "info")
+
+                elif tag == "progress":
+                    done, total = msg[1], max(1, msg[2])
+                    self.progress["value"] = int((done / total) * 100)
+                    self.detail.configure(text=f"{done} of {total}")
+
+                elif tag == "done":
+                    self._set_working(False)
+                    self.progress["value"] = 100
+                    self.status.set_state("done", "Finished")
+                    self.detail.configure(text=msg[1])
+                    self.btn_open.config(state="normal")
+                    self._log(f"Finished → {msg[1]}", kind="ok")
+                    if self.open_output_after_run_var.get():
+                        try:
+                            self._open_output()
+                        except Exception:
+                            pass
+
+                elif tag == "cancelled":
+                    self._set_working(False)
+                    self.progress["value"] = 0
+                    self.status.set_state("idle", "Cancelled")
+                    self.detail.configure(text="")
+                    self._log("Cancelled.", kind="muted")
+
+                elif tag == "error":
+                    self._set_working(False)
+                    self.status.set_state("error", "Failed")
+                    self.detail.configure(text="see Activity Log")
+                    self._log(msg[1], kind="err")
+                    messagebox.showerror("Conversion failed", msg[1])
+
+        except queue.Empty:
+            pass
+        self.after(100, self._poll_queue)
+
+
+def main():
+    App().mainloop()

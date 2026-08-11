@@ -1,0 +1,9 @@
+# Rilleras Converter — runtime dependencies
+# Installed automatically by setup.bat, or on first run by the app itself.
+
+PyMuPDF>=1.24.0        # PDF rendering, merge/split/rotate/compress, text extraction
+img2pdf>=0.5.1         # lossless images -> PDF
+Pillow>=10.2.0         # image decode/encode (jpg, png, webp, ico, tiff, ...)
+docx2pdf>=0.1.8        # Word -> PDF (drives Microsoft Word via COM; Windows only)
+pdf2docx>=0.5.8        # PDF -> Word (.docx) with layout reconstruction
+tkinterdnd2>=0.4.2     # optional: drag & drop files onto the window
