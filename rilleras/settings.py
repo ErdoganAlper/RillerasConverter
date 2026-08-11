@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -17,6 +18,25 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def settings_dir() -> Path:
+    """Where settings.json goes.
+
+    An installed build may sit in Program Files, which is not writable by a
+    normal user, so frozen builds keep settings under %APPDATA%. Running from
+    source keeps them in the repo, which is handy during development.
+    """
+    if getattr(sys, "frozen", False):
+        base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+        if base:
+            target = Path(base) / "RillerasConverter"
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                return target
+            except OSError:
+                pass  # fall back to the executable's folder
+    return app_dir()
+
+
 def resource_path(name: str) -> Path:
     """Locate a bundled resource, both frozen (PyInstaller _MEIPASS) and from source."""
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -24,7 +44,7 @@ def resource_path(name: str) -> Path:
     return app_dir() / name
 
 
-SETTINGS_FILE = app_dir() / "settings.json"
+SETTINGS_FILE = settings_dir() / "settings.json"
 
 DEFAULT_SETTINGS = {
     "language": i18n.DEFAULT_LANGUAGE,

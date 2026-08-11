@@ -9,9 +9,29 @@ Built with Python + Tkinter. No cloud, no uploads: everything runs on your machi
 
 ## Install
 
-Double-click **`setup.bat`**. That is the whole procedure.
+### To use the app — run the installer
 
-It will:
+Double-click **`RillerasConverterSetup.exe`**. That's it.
+
+No Python, no packages, no scripts. It installs per-user so Windows never asks for admin
+rights, adds a Start Menu entry and an optional Desktop shortcut, and registers a normal
+entry in *Add or remove programs*.
+
+Build it yourself with [`build.bat`](#build-the-installer), or grab it from the project's
+releases.
+
+> Windows SmartScreen will warn you the first time, because the installer is not
+> code-signed. Click **More info → Run anyway**. Removing that warning requires buying a
+> signing certificate.
+
+There is also a **portable** build — `dist\RillerasConverter.exe` — a single self-contained
+file you can copy onto a USB stick and run with no installation at all. It starts more
+slowly (it unpacks itself on each launch), so prefer the installer for a machine you use
+regularly.
+
+### To work on the code — run setup.bat
+
+Double-click **`setup.bat`**. It will:
 
 1. Find Python — and install it automatically via `winget` if the PC doesn't have it.
 2. Create an isolated virtual environment in `.venv`.
@@ -26,7 +46,7 @@ should never have to install packages by hand.
 
 ## Run
 
-Use the Desktop shortcut, the Start Menu entry, or:
+Use the Start Menu entry, the Desktop shortcut, or from source:
 
 ```bash
 python RillerasConverter.py
@@ -80,18 +100,39 @@ To add a language, add a code to `LANGUAGES` and a table to `TRANSLATIONS` in
 
 ---
 
-## Build a standalone `.exe`
+## Build the installer
 
 ```bash
 build.bat
 ```
 
-Produces `dist\RillerasConverter.exe` — a single file with Python and every dependency
-bundled, so it runs on a PC with no Python at all.
+One command, a few minutes, two outputs:
 
-If [Inno Setup](https://jrsoftware.org/isdl.php) is installed, `build.bat` also produces
-`installer\Output\RillerasConverterSetup.exe`: a proper Windows installer with Start Menu
-and Desktop entries and an uninstaller.
+| Output | What it is |
+|---|---|
+| `installer\Output\RillerasConverterSetup.exe` | The installer — this is what you give people |
+| `dist\RillerasConverter.exe` | Portable single file, no installation |
+
+Both bundle Python and every dependency, so they run on a PC with nothing installed.
+
+Building the installer needs [Inno Setup](https://jrsoftware.org/isdl.php)
+(`winget install JRSoftware.InnoSetup`). Without it `build.bat` still produces the portable
+exe and tells you what's missing.
+
+### Why two PyInstaller specs
+
+`RillerasConverter-onedir.spec` builds a folder — exe plus libraries side by side — and Inno
+Setup packs that folder into the installer. Nothing is unpacked at startup, so an installed
+copy opens in about a second.
+
+`RillerasConverter.spec` builds the portable single file. Convenient to copy around, but the
+bootloader has to expand ~100 MB into `%TEMP%` on every launch, which is why it is slower.
+
+Both specs share their bundling rules through `build_common.py` so they cannot drift apart.
+
+Installed builds keep `settings.json` in `%APPDATA%\RillerasConverter`, since an all-users
+install lands in Program Files where a normal user cannot write. Running from source keeps
+it in the repo folder.
 
 ---
 

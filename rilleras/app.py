@@ -24,7 +24,7 @@ from .modes import (
     OUT_DOCX, OUT_FOLDER, OUT_IMAGE, OUT_IMAGE_OR_FOLDER, OUT_PDF, OUT_TXT,
     group_heading, group_of, modes_in_group,
 )
-from .settings import load_settings, resource_path, save_settings, app_dir
+from .settings import load_settings, resource_path, save_settings, settings_dir
 from .theme import (
     C, Card, F_H1, F_MONO, F_SMALL, F_TINY, ModeCard, NavButton,
     ScrollFrame, StatusPill, apply_theme,
@@ -391,11 +391,12 @@ class App(BaseTk):
 
         card2 = Card(body, t("card.storage"), "")
         card2.pack(fill="x", padx=24, pady=(16, 0))
-        tk.Label(card2.body, text=t("settings.file_location", path=app_dir() / "settings.json"),
+        tk.Label(card2.body,
+                 text=t("settings.file_location", path=settings_dir() / "settings.json"),
                  bg=C.SURFACE, fg=C.TEXT_MUTED, font=F_TINY, anchor="w",
                  justify="left").pack(anchor="w", pady=(0, 10))
         ttk.Button(card2.body, text=t("btn.open_settings_folder"), style="Card.TButton",
-                   command=lambda: core.open_in_explorer(app_dir())).pack(anchor="w")
+                   command=lambda: core.open_in_explorer(settings_dir())).pack(anchor="w")
 
         card3 = Card(body, t("card.about"), "")
         card3.pack(fill="x", padx=24, pady=(16, 20))

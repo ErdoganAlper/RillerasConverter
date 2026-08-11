@@ -1,12 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec — portable single-file build.
+"""PyInstaller spec — one-folder build, used as the installer payload.
 
-Produces dist\\RillerasConverter.exe: one self-contained file you can copy to
-any Windows PC and run. The trade-off is startup time, because the bootloader
-unpacks ~100 MB to a temp folder on every launch. The installer uses the
-one-folder build instead (RillerasConverter-onedir.spec).
-
-Paths are relative to this file so the build works from any checkout.
+Produces dist\\RillerasConverter\\ containing the exe plus its libraries.
+Nothing is unpacked at startup, so the app opens in about a second instead of
+the ~20 s the single-file build needs to expand itself into %TEMP%. Inno Setup
+packs this folder into RillerasConverterSetup.exe, so the end user still only
+ever sees one file.
 """
 
 import os
@@ -35,16 +34,13 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,   # libraries live beside the exe, not inside it
     name='RillerasConverter',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -52,4 +48,14 @@ exe = EXE(
     icon='convert.ico',
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='RillerasConverter',
 )

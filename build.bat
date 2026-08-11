@@ -5,8 +5,14 @@ cd /d "%~dp0"
 
 echo.
 echo  ===========================================
-echo    Building RillerasConverter.exe
+echo    Rilleras Converter - Release build
 echo  ===========================================
+echo.
+echo  This produces:
+echo    1. installer\Output\RillerasConverterSetup.exe  (what you give people)
+echo    2. dist\RillerasConverter.exe                   (portable, no install)
+echo.
+echo  Expect this to take several minutes.
 echo.
 
 if not exist ".venv\Scripts\python.exe" (
@@ -18,50 +24,77 @@ if not exist ".venv\Scripts\python.exe" (
 
 set "VPY=%CD%\.venv\Scripts\python.exe"
 
-echo  Installing build tools...
+echo  [1/4] Installing build tools...
 "%VPY%" -m pip install --upgrade pyinstaller --disable-pip-version-check --quiet
 if errorlevel 1 (
     echo  Could not install PyInstaller.
-    pause
-    exit /b 1
+    goto fail
 )
 
-echo  Packaging (this takes a few minutes)...
-echo.
-"%VPY%" -m PyInstaller --noconfirm --clean RillerasConverter.spec
+echo  [2/4] Building the installer payload (folder build, fast startup)...
+"%VPY%" -m PyInstaller --noconfirm --clean --log-level WARN RillerasConverter-onedir.spec
 if errorlevel 1 (
-    echo.
-    echo  Build failed.
-    pause
-    exit /b 1
+    echo  Folder build failed.
+    goto fail
 )
 
-echo.
-echo  Built: %CD%\dist\RillerasConverter.exe
-echo.
+echo  [3/4] Building the portable single-file exe...
+"%VPY%" -m PyInstaller --noconfirm --log-level WARN RillerasConverter.spec
+if errorlevel 1 (
+    echo  Portable build failed.
+    goto fail
+)
 
-rem ------- optional: wrap the exe in a Windows installer using Inno Setup --
-set "ISCC="
-if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
-if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
-
+echo  [4/4] Building the Windows installer...
+call :find_iscc
 if not defined ISCC (
-    echo  Inno Setup not found - skipping installer build.
-    echo  To also produce Setup.exe, install it from https://jrsoftware.org/isdl.php
-    echo  and run build.bat again.
+    echo.
+    echo  Inno Setup was not found, so Setup.exe could not be built.
+    echo  Install it and run build.bat again:
+    echo      winget install JRSoftware.InnoSetup
+    echo  The portable exe in dist\ is still ready to use.
     goto done
 )
 
-echo  Building the Windows installer...
-"%ISCC%" "installer\RillerasConverter.iss"
+"%ISCC%" /Q "installer\RillerasConverter.iss"
 if errorlevel 1 (
     echo  Installer build failed.
-    goto done
+    goto fail
 )
+
 echo.
-echo  Installer: %CD%\installer\Output\RillerasConverterSetup.exe
+echo  ===========================================
+echo    Build complete
+echo  ===========================================
+echo.
+echo  Installer : %CD%\installer\Output\RillerasConverterSetup.exe
+echo  Portable  : %CD%\dist\RillerasConverter.exe
+echo.
+echo  Give people the installer. It needs no admin rights and adds
+echo  Start Menu and Desktop shortcuts plus an uninstaller.
+goto done
 
 :done
 echo.
 pause
+exit /b 0
+
+:fail
+echo.
+pause
+exit /b 1
+
+rem ------------------------------------------------------------ subroutine --
+:find_iscc
+set "ISCC="
+for %%D in (
+    "%ProgramFiles(x86)%\Inno Setup 6"
+    "%ProgramFiles%\Inno Setup 6"
+    "%LOCALAPPDATA%\Programs\Inno Setup 6"
+) do (
+    if exist "%%~D\ISCC.exe" (
+        set "ISCC=%%~D\ISCC.exe"
+        goto :eof
+    )
+)
 exit /b 0

@@ -65,6 +65,30 @@ def test_wrong_types_are_repaired(settings_file):
     assert loaded["recent_max"] == 10
 
 
+def test_settings_dir_is_the_repo_when_running_from_source():
+    assert settings_module.settings_dir() == settings_module.app_dir()
+
+
+def test_frozen_build_stores_settings_in_appdata(tmp_path, monkeypatch):
+    """An installed copy may live in Program Files, which is read-only."""
+    monkeypatch.setattr(settings_module.sys, "frozen", True, raising=False)
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+
+    target = settings_module.settings_dir()
+
+    assert target == tmp_path / "RillerasConverter"
+    assert target.is_dir()  # created on demand
+
+
+def test_frozen_build_falls_back_when_appdata_is_unusable(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_module.sys, "frozen", True, raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+    # No writable profile folder: fall back rather than raising.
+    assert settings_module.settings_dir() == settings_module.app_dir()
+
+
 def test_save_failure_is_swallowed(settings_file, monkeypatch):
     """A read-only install folder must not crash the app on exit."""
     def boom(*_args, **_kwargs):
