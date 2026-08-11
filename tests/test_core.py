@@ -314,3 +314,101 @@ def test_pdf_to_word_rejects_empty_selection(tmp_path):
     pdf = make_pdf(tmp_path / "doc.pdf", pages=2)
     with pytest.raises(core.ConversionError):
         core.pdf_to_word(pdf, tmp_path / "out.docx", page_range="50-60")
+
+
+# -------------------------------------------------------------- Images -> Word --
+
+python_docx_installed = importlib.util.find_spec("docx") is not None
+needs_docx = pytest.mark.skipif(not python_docx_installed, reason="python-docx not installed")
+
+
+@needs_docx
+def test_images_to_word_one_picture_per_image(tmp_path):
+    from docx import Document
+
+    src = tmp_path / "imgs"
+    src.mkdir()
+    for i in (1, 2, 10):
+        make_image(src / f"p{i}.png")
+    out = tmp_path / "album.docx"
+
+    core.images_to_word(src, out, recursive=False, sort_mode="natural")
+
+    assert out.exists()
+    assert len(Document(str(out)).inline_shapes) == 3
+
+
+@needs_docx
+def test_images_to_word_scales_wide_image_within_margins(tmp_path):
+    from docx import Document
+
+    src = tmp_path / "wide.png"
+    make_image(src, size=(4000, 500))
+    out = tmp_path / "wide.docx"
+
+    core.images_to_word(src, out, recursive=False, sort_mode="natural")
+
+    doc = Document(str(out))
+    section = doc.sections[0]
+    usable = section.page_width - section.left_margin - section.right_margin
+    shape = doc.inline_shapes[0]
+    assert shape.width <= usable
+
+
+@needs_docx
+def test_images_to_word_scales_tall_image_within_page_height(tmp_path):
+    from docx import Document
+
+    src = tmp_path / "tall.png"
+    make_image(src, size=(500, 4000))
+    out = tmp_path / "tall.docx"
+
+    core.images_to_word(src, out, recursive=False, sort_mode="natural")
+
+    doc = Document(str(out))
+    section = doc.sections[0]
+    usable_h = section.page_height - section.top_margin - section.bottom_margin
+    assert doc.inline_shapes[0].height <= usable_h
+
+
+@needs_docx
+def test_images_to_word_handles_webp(tmp_path):
+    """python-docx cannot embed WEBP, so it must be converted on the way in."""
+    from docx import Document
+
+    src = tmp_path / "shot.webp"
+    Image.new("RGB", (200, 150), (40, 90, 200)).save(src, "WEBP")
+    out = tmp_path / "shot.docx"
+
+    core.images_to_word(src, out, recursive=False, sort_mode="natural")
+
+    assert len(Document(str(out)).inline_shapes) == 1
+
+
+@needs_docx
+def test_images_to_word_forces_docx_extension(tmp_path):
+    src = tmp_path / "a.png"
+    make_image(src)
+    core.images_to_word(src, tmp_path / "wrong.pdf", recursive=False, sort_mode="natural")
+    assert (tmp_path / "wrong.docx").exists()
+
+
+@needs_docx
+def test_images_to_word_without_images_raises(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(core.ConversionError):
+        core.images_to_word(empty, tmp_path / "x.docx", recursive=False, sort_mode="natural")
+
+
+@needs_docx
+def test_images_to_word_is_cancellable(tmp_path):
+    src = tmp_path / "imgs"
+    src.mkdir()
+    make_image(src / "a.png")
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(core.Cancelled):
+        core.images_to_word(src, tmp_path / "out.docx", recursive=False,
+                            sort_mode="natural", cancel_event=cancel)

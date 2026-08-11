@@ -44,6 +44,7 @@ python RillerasConverter.py
 | Word → PDF | Requires Microsoft Word installed |
 | PDF → Images | One image per page, any DPI |
 | Images → PDF | Lossless, naturally sorted (`page2` before `page10`) |
+| Images → Word (`.docx`) | One picture per page, scaled to fit the margins |
 | Word → Images | Via Word, then rendered per page |
 | PDF → Text | Plain `.txt` from the text layer |
 | PDF → Long Image | All pages stitched into one tall image |
@@ -59,6 +60,15 @@ or re-render at a lower DPI).
 
 Everything runs on a background thread with live progress, a cancel button and an
 activity log, so the window never freezes mid-job.
+
+### Language
+
+The interface ships in **English and Turkish** (*İngilizce ve Türkçe*). Pick one under
+**Settings → Language**; the window relabels itself immediately and remembers the choice.
+Error messages and the activity log are translated too, not just the buttons.
+
+To add a language, add a code to `LANGUAGES` and a table to `TRANSLATIONS` in
+`rilleras/i18n.py`. The test suite fails if a language is missing any key.
 
 ### Two things worth knowing
 
@@ -98,15 +108,21 @@ test builds the real window and walks every screen and mode.
 RillerasConverter.py     launcher + automatic dependency install
 rilleras/
   core.py                conversion engine — pure functions, no UI
+  i18n.py                English/Turkish string tables
   modes.py               declarative table of every conversion
   settings.py            settings.json persistence
   theme.py               dark theme + custom widgets
   app.py                 the window
-tests/                   engine tests + UI smoke tests
+tests/                   engine tests + i18n tests + UI smoke tests
 setup.bat                one-click install
 build.bat                exe + installer build
 installer/               Inno Setup script
+tools/make_icon.py       regenerates convert.ico
 ```
+
+The app icon is generated, not hand-drawn — run `python tools/make_icon.py` after editing
+it. It writes all seven sizes into `convert.ico`, using simplified artwork below 32px so
+the mark stays legible on the taskbar.
 
 ## Author
 

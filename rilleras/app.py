@@ -11,17 +11,18 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import __version__, core
+from . import __version__, core, i18n
 from .core import (
     IMAGE_EXTS, OUT_IMAGE_FORMATS, PRESETS, Cancelled, ConversionError,
 )
+from .i18n import t
 from .modes import (
-    GROUP_BATCH, GROUP_IMAGE, GROUP_MAIN, GROUP_PDF, GROUP_TITLES,
+    GROUPS, GROUP_BATCH, GROUP_IMAGE, GROUP_MAIN, GROUP_PDF,
     IN_DOCX, IN_FOLDER, IN_IMAGE_OR_FOLDER, IN_NONE, IN_PDF, MODES,
     OPT_COMPRESS, OPT_IMAGE_OUT, OPT_MERGE, OPT_PAGES, OPT_RECURSIVE,
     OPT_RENDER, OPT_ROTATE, OPT_SORT, OPT_SPLIT,
     OUT_DOCX, OUT_FOLDER, OUT_IMAGE, OUT_IMAGE_OR_FOLDER, OUT_PDF, OUT_TXT,
-    group_of, modes_in_group,
+    group_heading, group_of, modes_in_group,
 )
 from .settings import load_settings, resource_path, save_settings, app_dir
 from .theme import (
@@ -37,7 +38,7 @@ except Exception:
 
 BaseTk = TkinterDnD.Tk if HAS_DND else tk.Tk
 
-IMAGE_FILETYPES = [("Images", "*.jpg *.jpeg *.png *.webp *.tif *.tiff *.bmp")]
+IMAGE_PATTERNS = "*.jpg *.jpeg *.png *.webp *.tif *.tiff *.bmp"
 
 
 def log_time() -> str:
@@ -47,6 +48,9 @@ def log_time() -> str:
 class App(BaseTk):
     def __init__(self):
         super().__init__()
+
+        self._settings = load_settings()
+        i18n.set_language(self._settings.get("language", i18n.DEFAULT_LANGUAGE))
 
         self.title(f"Rilleras Converter {__version__}")
         self.geometry("1120x780")
@@ -64,7 +68,6 @@ class App(BaseTk):
         self.cancel_event = threading.Event()
         self.worker_thread: threading.Thread | None = None
 
-        self._settings = load_settings()
         self._init_vars()
 
         self.merge_list: list[Path] = []
@@ -82,9 +85,9 @@ class App(BaseTk):
         if HAS_DND:
             self._enable_dnd()
 
-        self._log("Rilleras Converter ready.", kind="ok")
+        self._log(t("log.ready"), kind="ok")
         if not HAS_DND:
-            self._log("Drag & drop unavailable (tkinterdnd2 not installed).", kind="muted")
+            self._log(t("log.dnd_missing"), kind="muted")
 
     # ------------------------------------------------------------- state --
 
@@ -94,6 +97,8 @@ class App(BaseTk):
         self.mode_var = tk.StringVar(value=s["last_mode"] if s["last_mode"] in MODES else "pdf_to_word")
         self.in_path = tk.StringVar()
         self.out_path = tk.StringVar()
+        self.language_var = tk.StringVar(
+            value=i18n.LANGUAGES.get(i18n.get_language(), "English"))
 
         self.dpi_var = tk.StringVar(value=str(s["dpi"]))
         self.fmt_var = tk.StringVar(value=str(s["fmt"]))
@@ -160,7 +165,7 @@ class App(BaseTk):
 
         right = tk.Frame(head, bg=C.BG_DEEP)
         right.grid(row=0, column=2, sticky="e", padx=(0, 22), pady=16)
-        tk.Label(right, text="Quality preset", bg=C.BG_DEEP, fg=C.TEXT_MUTED,
+        tk.Label(right, text=t("header.preset"), bg=C.BG_DEEP, fg=C.TEXT_MUTED,
                  font=F_SMALL).pack(side="left", padx=(0, 9))
         cb = ttk.Combobox(right, textvariable=self.preset_var, values=list(PRESETS.keys()),
                           state="readonly", width=30)
@@ -175,29 +180,28 @@ class App(BaseTk):
         bar.grid_propagate(False)
 
         items = [
-            (GROUP_MAIN, "🔁", "Convert"),
-            (GROUP_PDF, "📕", "PDF Tools"),
-            (GROUP_IMAGE, "🎨", "Image Tools"),
-            (GROUP_BATCH, "📦", "Batch Word"),
-            ("settings", "⚙️", "Settings"),
-            ("log", "📋", "Activity Log"),
+            (GROUP_MAIN, "🔁"),
+            (GROUP_PDF, "📕"),
+            (GROUP_IMAGE, "🎨"),
+            (GROUP_BATCH, "📦"),
+            ("settings", "⚙️"),
+            ("log", "📋"),
         ]
         tk.Frame(bar, bg=C.BG_DEEP, height=8).pack(fill="x")
-        for key, icon, label in items:
+        for key, icon in items:
             if key == "settings":
                 tk.Frame(bar, bg=C.BORDER_SOFT, height=1).pack(fill="x", padx=16, pady=10)
-            btn = NavButton(bar, icon, label, command=lambda k=key: self._select_view(k))
+            btn = NavButton(bar, icon, t(f"nav.{key}"), command=lambda k=key: self._select_view(k))
             btn.pack(fill="x")
             self._nav_buttons[key] = btn
 
         foot = tk.Frame(bar, bg=C.BG_DEEP)
         foot.pack(side="bottom", fill="x", pady=14, padx=16)
-        self.dnd_hint = tk.Label(
+        tk.Label(
             foot,
-            text="Drop a file anywhere\nto load it" if HAS_DND else "Drag & drop disabled",
+            text=t("sidebar.drop_hint") if HAS_DND else t("sidebar.dnd_off"),
             bg=C.BG_DEEP, fg=C.TEXT_MUTED, font=F_TINY, justify="left", anchor="w",
-        )
-        self.dnd_hint.pack(anchor="w")
+        ).pack(anchor="w")
 
         tk.Frame(parent, bg=C.BORDER_SOFT, width=1).grid(row=0, column=0, sticky="nse")
 
@@ -209,7 +213,7 @@ class App(BaseTk):
 
         # The subtitle is retitled per group; it must be non-empty here so that
         # Card actually creates the label to write into later.
-        self.mode_panel = Card(body, "Choose a conversion", " ")
+        self.mode_panel = Card(body, t("panel.choose"), " ")
         self.mode_panel.pack(fill="x", padx=24, pady=(20, 0))
         self.mode_grid = tk.Frame(self.mode_panel.body, bg=C.SURFACE)
         self.mode_grid.pack(fill="x")
@@ -221,59 +225,59 @@ class App(BaseTk):
         tk.Frame(body, bg=C.BG, height=16).pack(fill="x")
 
     def _build_files_card(self, parent):
-        self.files_card = Card(parent, "Files", "where to read from and write to")
+        self.files_card = Card(parent, t("card.files.title"), t("card.files.sub"))
         self.files_card.pack(fill="x", padx=24, pady=(16, 0))
         b = self.files_card.body
         b.columnconfigure(1, weight=1)
 
-        # recent inputs
-        tk.Label(b, text="Recent", bg=C.SURFACE, fg=C.TEXT_MUTED, font=F_SMALL)\
+        tk.Label(b, text=t("field.recent"), bg=C.SURFACE, fg=C.TEXT_MUTED, font=F_SMALL)\
             .grid(row=0, column=0, sticky="w", pady=(0, 10))
         self.recent_cb = ttk.Combobox(b, values=[], state="readonly")
         self.recent_cb.grid(row=0, column=1, sticky="ew", padx=(14, 10), pady=(0, 10))
         self.recent_cb.bind("<<ComboboxSelected>>", lambda e: self._choose_recent_input())
-        ttk.Button(b, text="Clear", style="Card.TButton", command=self._clear_recent_inputs)\
+        ttk.Button(b, text=t("btn.clear"), style="Card.TButton", command=self._clear_recent_inputs)\
             .grid(row=0, column=2, sticky="e", pady=(0, 10))
 
-        # input
-        self.lbl_in = tk.Label(b, text="Input", bg=C.SURFACE, fg=C.TEXT_DIM, font=F_SMALL, anchor="w")
+        self.lbl_in = tk.Label(b, text=t("field.input"), bg=C.SURFACE, fg=C.TEXT_DIM,
+                               font=F_SMALL, anchor="w")
         self.lbl_in.grid(row=1, column=0, sticky="w", pady=6)
         self.entry_in = ttk.Entry(b, textvariable=self.in_path)
         self.entry_in.grid(row=1, column=1, sticky="ew", padx=(14, 10), pady=6)
-        self.btn_browse_in = ttk.Button(b, text="Browse…", style="Card.TButton",
+        self.btn_browse_in = ttk.Button(b, text=t("btn.browse"), style="Card.TButton",
                                         command=self._browse_input)
         self.btn_browse_in.grid(row=1, column=2, sticky="e", pady=6)
 
-        # output
-        self.lbl_out = tk.Label(b, text="Output", bg=C.SURFACE, fg=C.TEXT_DIM, font=F_SMALL, anchor="w")
+        self.lbl_out = tk.Label(b, text=t("field.output"), bg=C.SURFACE, fg=C.TEXT_DIM,
+                                font=F_SMALL, anchor="w")
         self.lbl_out.grid(row=2, column=0, sticky="w", pady=6)
         self.entry_out = ttk.Entry(b, textvariable=self.out_path)
         self.entry_out.grid(row=2, column=1, sticky="ew", padx=(14, 10), pady=6)
-        ttk.Button(b, text="Browse…", style="Card.TButton", command=self._browse_output)\
+        ttk.Button(b, text=t("btn.browse"), style="Card.TButton", command=self._browse_output)\
             .grid(row=2, column=2, sticky="e", pady=6)
 
         self.mode_hint = tk.Label(b, text="", bg=C.SURFACE, fg=C.TEXT_MUTED,
                                   font=F_TINY, anchor="w", justify="left")
         self.mode_hint.grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
-        self.word_badge = tk.Label(b, text="  ⚠  Requires Microsoft Word installed on this PC  ",
+        self.word_badge = tk.Label(b, text=t("badge.requires_word"),
                                    bg="#2A2418", fg=C.WARN, font=F_TINY, anchor="w")
-        # gridded on demand by _on_mode_changed
-        self._word_badge_row = 4
+        self._word_badge_row = 4  # gridded on demand by _on_mode_changed
 
     def _build_merge_card(self, parent):
-        self.merge_card = Card(parent, "Merge list", "files are merged top to bottom")
+        self.merge_card = Card(parent, t("card.merge.title"), t("card.merge.sub"))
         b = self.merge_card.body
 
         btns = tk.Frame(b, bg=C.SURFACE)
         btns.pack(fill="x", pady=(0, 10))
-        ttk.Button(btns, text="Add PDFs…", style="Card.TButton", command=self._merge_add).pack(side="left")
-        ttk.Button(btns, text="Move up", style="Card.TButton",
-                   command=lambda: self._merge_move(-1)).pack(side="left", padx=(8, 0))
-        ttk.Button(btns, text="Move down", style="Card.TButton",
-                   command=lambda: self._merge_move(1)).pack(side="left", padx=(8, 0))
-        ttk.Button(btns, text="Remove", style="Card.TButton", command=self._merge_remove).pack(side="left", padx=(8, 0))
-        ttk.Button(btns, text="Clear", style="Card.TButton", command=self._merge_clear).pack(side="left", padx=(8, 0))
+        for label, cmd in (
+            (t("btn.add_pdfs"), self._merge_add),
+            (t("btn.move_up"), lambda: self._merge_move(-1)),
+            (t("btn.move_down"), lambda: self._merge_move(1)),
+            (t("btn.remove"), self._merge_remove),
+            (t("btn.clear"), self._merge_clear),
+        ):
+            ttk.Button(btns, text=label, style="Card.TButton", command=cmd)\
+                .pack(side="left", padx=(0, 8))
 
         self.merge_box = tk.Listbox(
             b, height=7, bg=C.SURFACE_2, fg=C.TEXT, font=F_SMALL,
@@ -284,7 +288,7 @@ class App(BaseTk):
         self.merge_box.pack(fill="x")
 
     def _build_options_card(self, parent):
-        self.options_card = Card(parent, "Options", "only what applies to this conversion")
+        self.options_card = Card(parent, t("card.options.title"), t("card.options.sub"))
         b = self.options_card.body
         self._option_rows: dict[str, tk.Frame] = {}
 
@@ -296,77 +300,67 @@ class App(BaseTk):
         def label(parent_, text: str):
             return tk.Label(parent_, text=text, bg=C.SURFACE, fg=C.TEXT_MUTED, font=F_SMALL)
 
-        # render: dpi / format / quality
+        def hint(parent_, text: str):
+            return tk.Label(parent_, text=text, bg=C.SURFACE, fg=C.TEXT_MUTED, font=F_TINY)
+
         r = row(OPT_RENDER)
-        label(r, "DPI").pack(side="left")
+        label(r, t("opt.dpi")).pack(side="left")
         ttk.Entry(r, textvariable=self.dpi_var, width=7).pack(side="left", padx=(10, 22))
-        label(r, "Format").pack(side="left")
+        label(r, t("opt.format")).pack(side="left")
         ttk.Combobox(r, textvariable=self.fmt_var, values=["png", "jpg"],
                      state="readonly", width=6).pack(side="left", padx=(10, 22))
-        label(r, "JPG quality").pack(side="left")
+        label(r, t("opt.jpg_quality")).pack(side="left")
         self.quality_value = tk.Label(r, text=str(self.jpg_quality_var.get()),
                                       bg=C.SURFACE, fg=C.ACCENT, font=F_SMALL, width=3)
         self.quality_value.pack(side="right")
         ttk.Scale(r, from_=50, to=95, orient="horizontal", variable=self.jpg_quality_var,
-                  command=self._on_quality_slide).pack(side="left", padx=(10, 10), fill="x", expand=True)
+                  command=self._on_quality_slide).pack(side="left", padx=(10, 10),
+                                                       fill="x", expand=True)
 
-        # page range
         r = row(OPT_PAGES)
-        label(r, "Pages").pack(side="left")
+        label(r, t("opt.pages")).pack(side="left")
         ttk.Entry(r, textvariable=self.page_range_var, width=22).pack(side="left", padx=(10, 12))
-        tk.Label(r, text="all,  or  1-3,7,10-", bg=C.SURFACE, fg=C.TEXT_MUTED,
-                 font=F_TINY).pack(side="left")
+        hint(r, t("opt.pages_hint")).pack(side="left")
 
-        # recursive
         r = row(OPT_RECURSIVE)
-        ttk.Checkbutton(r, text="Include images in subfolders", variable=self.recursive_var)\
-            .pack(side="left")
+        ttk.Checkbutton(r, text=t("opt.recursive"), variable=self.recursive_var).pack(side="left")
 
-        # sort
         r = row(OPT_SORT)
-        label(r, "Page order").pack(side="left")
+        label(r, t("opt.sort")).pack(side="left")
         ttk.Combobox(r, textvariable=self.sort_mode_var, values=["natural", "name", "mtime"],
                      state="readonly", width=12).pack(side="left", padx=(10, 12))
-        tk.Label(r, text="natural puts page2 before page10", bg=C.SURFACE,
-                 fg=C.TEXT_MUTED, font=F_TINY).pack(side="left")
+        hint(r, t("opt.sort_hint")).pack(side="left")
 
-        # image output
         r = row(OPT_IMAGE_OUT)
-        label(r, "Save as").pack(side="left")
+        label(r, t("opt.save_as")).pack(side="left")
         ttk.Combobox(r, textvariable=self.batch_img_fmt_var, values=OUT_IMAGE_FORMATS,
                      state="readonly", width=7).pack(side="left", padx=(10, 22))
-        label(r, "Max size (px)").pack(side="left")
+        label(r, t("opt.max_size")).pack(side="left")
         ttk.Entry(r, textvariable=self.resize_max_var, width=8).pack(side="left", padx=(10, 22))
-        label(r, "Quality").pack(side="left")
+        label(r, t("opt.quality")).pack(side="left")
         ttk.Entry(r, textvariable=self.resize_quality_var, width=6).pack(side="left", padx=(10, 0))
 
-        # rotate
         r = row(OPT_ROTATE)
-        label(r, "Rotate by").pack(side="left")
+        label(r, t("opt.rotate_by")).pack(side="left")
         ttk.Combobox(r, textvariable=self.rotate_deg_var, values=[90, 180, 270],
                      state="readonly", width=6).pack(side="left", padx=(10, 8))
-        tk.Label(r, text="degrees clockwise", bg=C.SURFACE, fg=C.TEXT_MUTED,
-                 font=F_TINY).pack(side="left")
+        hint(r, t("opt.degrees_cw")).pack(side="left")
 
-        # split
         r = row(OPT_SPLIT)
-        label(r, "Split").pack(side="left")
+        label(r, t("opt.split")).pack(side="left")
         ttk.Combobox(r, textvariable=self.split_mode_var, values=["each", "ranges"],
                      state="readonly", width=9).pack(side="left", padx=(10, 22))
-        label(r, "Ranges").pack(side="left")
+        label(r, t("opt.ranges")).pack(side="left")
         ttk.Entry(r, textvariable=self.split_ranges_var, width=30).pack(side="left", padx=(10, 12))
-        tk.Label(r, text="used when split = ranges", bg=C.SURFACE, fg=C.TEXT_MUTED,
-                 font=F_TINY).pack(side="left")
+        hint(r, t("opt.ranges_hint")).pack(side="left")
 
-        # compress
         r = row(OPT_COMPRESS)
-        label(r, "Method").pack(side="left")
+        label(r, t("opt.method")).pack(side="left")
         ttk.Combobox(r, textvariable=self.compress_mode_var, values=["clean", "rebuild"],
                      state="readonly", width=9).pack(side="left", padx=(10, 22))
-        label(r, "Rebuild DPI").pack(side="left")
+        label(r, t("opt.rebuild_dpi")).pack(side="left")
         ttk.Entry(r, textvariable=self.compress_dpi_var, width=8).pack(side="left", padx=(10, 12))
-        tk.Label(r, text="clean is lossless; rebuild re-renders pages",
-                 bg=C.SURFACE, fg=C.TEXT_MUTED, font=F_TINY).pack(side="left")
+        hint(r, t("opt.compress_hint")).pack(side="left")
 
     # ---- settings view ----
 
@@ -374,37 +368,45 @@ class App(BaseTk):
         self.settings_view = ScrollFrame(self.content)
         body = self.settings_view.body
 
-        card = Card(body, "Behaviour", "")
-        card.pack(fill="x", padx=24, pady=(20, 0))
-        b = card.body
+        lang_card = Card(body, t("card.language"), "")
+        lang_card.pack(fill="x", padx=24, pady=(20, 0))
+        lb = lang_card.body
+        self.language_cb = ttk.Combobox(lb, textvariable=self.language_var,
+                                        values=list(i18n.LANGUAGES.values()),
+                                        state="readonly", width=24)
+        self.language_cb.pack(anchor="w")
+        self.language_cb.bind("<<ComboboxSelected>>", lambda e: self._on_language_changed())
+        tk.Label(lb, text=t("settings.language_hint"), bg=C.SURFACE, fg=C.TEXT_MUTED,
+                 font=F_TINY, anchor="w").pack(anchor="w", pady=(8, 0))
 
+        card = Card(body, t("card.behaviour"), "")
+        card.pack(fill="x", padx=24, pady=(16, 0))
         for text, var in [
-            ("Remember the last input and output paths between runs", self.remember_paths_var),
-            ("Open the output folder automatically when a job finishes", self.open_output_after_run_var),
-            ("Ask before overwriting existing files", self.confirm_overwrite_var),
+            (t("settings.remember_paths"), self.remember_paths_var),
+            (t("settings.open_after"), self.open_output_after_run_var),
+            (t("settings.confirm_overwrite"), self.confirm_overwrite_var),
         ]:
-            ttk.Checkbutton(b, text=text, variable=var, command=self._persist_settings)\
-                .pack(anchor="w", pady=5)
+            ttk.Checkbutton(card.body, text=text, variable=var,
+                            command=self._persist_settings).pack(anchor="w", pady=5)
 
-        card2 = Card(body, "Storage", "")
+        card2 = Card(body, t("card.storage"), "")
         card2.pack(fill="x", padx=24, pady=(16, 0))
-        b2 = card2.body
-        tk.Label(b2, text=f"Settings file: {app_dir() / 'settings.json'}", bg=C.SURFACE,
-                 fg=C.TEXT_MUTED, font=F_TINY, anchor="w", justify="left").pack(anchor="w", pady=(0, 10))
-        ttk.Button(b2, text="Open settings folder", style="Card.TButton",
+        tk.Label(card2.body, text=t("settings.file_location", path=app_dir() / "settings.json"),
+                 bg=C.SURFACE, fg=C.TEXT_MUTED, font=F_TINY, anchor="w",
+                 justify="left").pack(anchor="w", pady=(0, 10))
+        ttk.Button(card2.body, text=t("btn.open_settings_folder"), style="Card.TButton",
                    command=lambda: core.open_in_explorer(app_dir())).pack(anchor="w")
 
-        card3 = Card(body, "About", "")
+        card3 = Card(body, t("card.about"), "")
         card3.pack(fill="x", padx=24, pady=(16, 20))
-        b3 = card3.body
-        dnd = "enabled" if HAS_DND else "not installed (pip install tkinterdnd2)"
+        dnd_state = t("about.dnd_on") if HAS_DND else t("about.dnd_off")
         for line in [
-            f"Rilleras Converter {__version__}",
-            f"Drag & drop: {dnd}",
-            "Word conversions drive Microsoft Word and need it installed.",
-            "PDF → Word uses pdf2docx and keeps the page layout.",
+            t("about.version", version=__version__),
+            t("about.dnd", state=dnd_state),
+            t("about.word"),
+            t("about.pdf2docx"),
         ]:
-            tk.Label(b3, text=line, bg=C.SURFACE, fg=C.TEXT_DIM, font=F_SMALL,
+            tk.Label(card3.body, text=line, bg=C.SURFACE, fg=C.TEXT_DIM, font=F_SMALL,
                      anchor="w", justify="left").pack(anchor="w", pady=2)
 
     # ---- log view ----
@@ -412,14 +414,16 @@ class App(BaseTk):
     def _build_log_view(self):
         self.log_view = tk.Frame(self.content, bg=C.BG)
 
-        card = Card(self.log_view, "Activity log", "")
+        card = Card(self.log_view, t("card.log.title"), "")
         card.pack(fill="both", expand=True, padx=24, pady=20)
         b = card.body
 
         bar = tk.Frame(b, bg=C.SURFACE)
         bar.pack(fill="x", pady=(0, 10))
-        ttk.Button(bar, text="Clear", style="Card.TButton", command=self._clear_log).pack(side="left")
-        ttk.Button(bar, text="Copy all", style="Card.TButton", command=self._copy_log).pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text=t("btn.clear"), style="Card.TButton",
+                   command=self._clear_log).pack(side="left")
+        ttk.Button(bar, text=t("btn.copy_all"), style="Card.TButton",
+                   command=self._copy_log).pack(side="left", padx=(8, 0))
 
         wrap = tk.Frame(b, bg=C.SURFACE_2, highlightthickness=1,
                         highlightbackground=C.BORDER, bd=0)
@@ -434,11 +438,9 @@ class App(BaseTk):
         scroll.pack(side="right", fill="y")
         self.log.pack(side="left", fill="both", expand=True)
 
-        self.log.tag_configure("time", foreground=C.TEXT_MUTED)
-        self.log.tag_configure("info", foreground=C.TEXT_DIM)
-        self.log.tag_configure("ok", foreground=C.SUCCESS)
-        self.log.tag_configure("err", foreground=C.DANGER)
-        self.log.tag_configure("muted", foreground=C.TEXT_MUTED)
+        for tag, colour in (("time", C.TEXT_MUTED), ("info", C.TEXT_DIM), ("ok", C.SUCCESS),
+                            ("err", C.DANGER), ("muted", C.TEXT_MUTED)):
+            self.log.tag_configure(tag, foreground=colour)
         self.log.configure(state="disabled")
 
     # ---- footer ----
@@ -453,6 +455,7 @@ class App(BaseTk):
         foot.columnconfigure(1, weight=1)
 
         self.status = StatusPill(foot)
+        self.status.set_state("idle", t("status.ready"))
         self.status.grid(row=0, column=0, sticky="w", padx=(22, 0), pady=14)
 
         self.detail = tk.Label(foot, text="", bg=C.BG_DEEP, fg=C.TEXT_MUTED, font=F_SMALL)
@@ -461,14 +464,59 @@ class App(BaseTk):
         right = tk.Frame(foot, bg=C.BG_DEEP)
         right.grid(row=0, column=2, sticky="e", padx=(0, 22), pady=14)
 
-        self.btn_open = ttk.Button(right, text="Open output", command=self._open_output,
-                                   state="disabled")
+        self.btn_open = ttk.Button(right, text=t("btn.open_output"),
+                                   command=self._open_output, state="disabled")
         self.btn_open.pack(side="left", padx=(0, 10))
-        self.btn_cancel = ttk.Button(right, text="Cancel", command=self._cancel, state="disabled")
+        self.btn_cancel = ttk.Button(right, text=t("btn.cancel"), command=self._cancel,
+                                     state="disabled")
         self.btn_cancel.pack(side="left", padx=(0, 10))
-        self.btn_run = ttk.Button(right, text="Run conversion", style="Accent.TButton",
+        self.btn_run = ttk.Button(right, text=t("btn.run"), style="Accent.TButton",
                                   command=self._run)
         self.btn_run.pack(side="left")
+
+    # ------------------------------------------------------- language ----
+
+    def _on_language_changed(self):
+        chosen = self.language_var.get()
+        code = next((c for c, name in i18n.LANGUAGES.items() if name == chosen),
+                    i18n.DEFAULT_LANGUAGE)
+        if code == i18n.get_language():
+            return
+        i18n.set_language(code)
+        self._persist_settings()
+        self._rebuild_ui()
+        self._log(t("log.language_changed", name=chosen), kind="muted")
+
+    def _rebuild_ui(self):
+        """Tear the window down and rebuild it in the newly chosen language.
+
+        Every widget caches its text at creation time, so re-creating them is
+        far more reliable than trying to re-label ~120 widgets individually.
+        Tk variables are not widgets, so all user input survives untouched.
+        """
+        previous_log = self.log.get("1.0", "end").rstrip("\n")
+        view = self._current_view
+
+        for child in self.winfo_children():
+            child.destroy()
+        self._nav_buttons.clear()
+        self._mode_cards.clear()
+
+        self._build_ui()
+        self._select_view(view if view in self._nav_buttons else self._current_group)
+        self._on_mode_changed(persist=False)
+        self._refresh_recent_inputs_ui()
+        self._merge_refresh()
+        self._on_quality_slide()
+
+        if previous_log:
+            self.log.configure(state="normal")
+            self.log.insert("end", previous_log + "\n")
+            self.log.see("end")
+            self.log.configure(state="disabled")
+
+        running = self.worker_thread is not None and self.worker_thread.is_alive()
+        self._set_working(running)
 
     # ------------------------------------------------------ view switching --
 
@@ -479,7 +527,7 @@ class App(BaseTk):
         for view in (self.convert_view, self.settings_view, self.log_view):
             view.pack_forget()
 
-        if key in (GROUP_MAIN, GROUP_PDF, GROUP_IMAGE, GROUP_BATCH):
+        if key in GROUPS:
             self._current_group = key
             self._rebuild_mode_grid(key)
             if group_of(self.mode_var.get()) != key:
@@ -500,8 +548,7 @@ class App(BaseTk):
             child.destroy()
         self._mode_cards.clear()
 
-        title, subtitle = GROUP_TITLES[group]
-        self._set_panel_heading(title, subtitle)
+        self._set_panel_heading(*group_heading(group))
 
         cols = 3
         for i in range(cols):
@@ -538,13 +585,8 @@ class App(BaseTk):
         spec = MODES[self.mode_var.get()]
         self._sync_mode_selection()
 
-        self.lbl_in.configure(text="Input")
-        self.lbl_out.configure(text="Output")
-        self.mode_hint.configure(
-            text=f"{spec.input_label}   →   {spec.output_label}"
-        )
+        self.mode_hint.configure(text=f"{spec.input_label}   →   {spec.output_label}")
 
-        # input row is meaningless for merge
         show_input = spec.input_kind != IN_NONE
         state = "normal" if show_input else "disabled"
         self.entry_in.configure(state=state)
@@ -557,8 +599,7 @@ class App(BaseTk):
         else:
             self.word_badge.grid_remove()
 
-        # option rows
-        for key, frame in self._option_rows.items():
+        for frame in self._option_rows.values():
             frame.pack_forget()
         wanted = [k for k in (OPT_RENDER, OPT_PAGES, OPT_IMAGE_OUT, OPT_SORT,
                               OPT_RECURSIVE, OPT_ROTATE, OPT_SPLIT, OPT_COMPRESS)
@@ -607,7 +648,7 @@ class App(BaseTk):
                 self.mode_var.set(suggestion)
                 self._select_view(group_of(suggestion))
                 self._on_mode_changed()
-            self._log(f"Loaded: {p}", kind="info")
+            self._log(t("log.loaded", path=p), kind="info")
 
         self.drop_target_register(DND_FILES)
         self.dnd_bind("<<Drop>>", on_drop)
@@ -663,12 +704,13 @@ class App(BaseTk):
         self.fmt_var.set(p["fmt"])
         self.jpg_quality_var.set(int(p["jpg_quality"]))
         self._on_quality_slide()
-        self._log(f"Preset applied: {name}", kind="muted")
+        self._log(t("log.preset_applied", name=name), kind="muted")
         self._persist_settings()
 
     def _persist_settings(self):
         remember = bool(self.remember_paths_var.get())
         data = dict(
+            language=i18n.get_language(),
             remember_paths=remember,
             open_output_after_run=bool(self.open_output_after_run_var.get()),
             confirm_overwrite=bool(self.confirm_overwrite_var.get()),
@@ -703,8 +745,8 @@ class App(BaseTk):
     # -------------------------------------------------------- merge list --
 
     def _merge_add(self):
-        files = filedialog.askopenfilenames(title="Select PDFs to merge",
-                                            filetypes=[("PDF", "*.pdf")])
+        files = filedialog.askopenfilenames(title=t("dlg.select_pdfs_merge"),
+                                            filetypes=[(t("filetype.pdf"), "*.pdf")])
         for f in files:
             p = Path(f)
             if p.exists() and p.suffix.lower() == ".pdf":
@@ -716,8 +758,7 @@ class App(BaseTk):
         self._merge_refresh()
 
     def _merge_remove(self):
-        sel = list(self.merge_box.curselection())
-        for i in reversed(sel):
+        for i in reversed(list(self.merge_box.curselection())):
             del self.merge_list[i]
         self._merge_refresh()
 
@@ -755,26 +796,26 @@ class App(BaseTk):
         p = ""
 
         if spec.input_kind == IN_NONE:
-            messagebox.showinfo("Merge PDFs", "Use 'Add PDFs…' in the merge list below.")
+            messagebox.showinfo(t("dlg.merge_title"), t("dlg.merge_use_list"))
             return
         if spec.input_kind == IN_DOCX:
-            p = filedialog.askopenfilename(title="Select Word document",
-                                           filetypes=[("Word", "*.docx")], initialdir=initial)
+            p = filedialog.askopenfilename(title=t("dlg.select_word"),
+                                           filetypes=[(t("filetype.word"), "*.docx")],
+                                           initialdir=initial)
         elif spec.input_kind == IN_PDF:
-            p = filedialog.askopenfilename(title="Select PDF",
-                                           filetypes=[("PDF", "*.pdf")], initialdir=initial)
+            p = filedialog.askopenfilename(title=t("dlg.select_pdf"),
+                                           filetypes=[(t("filetype.pdf"), "*.pdf")],
+                                           initialdir=initial)
         elif spec.input_kind == IN_FOLDER:
-            p = filedialog.askdirectory(title="Select folder", initialdir=initial)
+            p = filedialog.askdirectory(title=t("dlg.select_folder"), initialdir=initial)
         elif spec.input_kind == IN_IMAGE_OR_FOLDER:
-            use_folder = messagebox.askyesno(
-                "Choose input",
-                "Convert a whole folder?\n\nYes — pick a folder\nNo — pick a single image",
-            )
-            if use_folder:
-                p = filedialog.askdirectory(title="Select folder of images", initialdir=initial)
+            if messagebox.askyesno(t("dlg.choose_input"), t("dlg.folder_or_file")):
+                p = filedialog.askdirectory(title=t("dlg.select_images_folder"),
+                                            initialdir=initial)
             else:
-                p = filedialog.askopenfilename(title="Select image",
-                                               filetypes=IMAGE_FILETYPES, initialdir=initial)
+                p = filedialog.askopenfilename(title=t("dlg.select_image"),
+                                               filetypes=[(t("filetype.images"), IMAGE_PATTERNS)],
+                                               initialdir=initial)
 
         if p:
             self.in_path.set(p)
@@ -793,24 +834,28 @@ class App(BaseTk):
             kind = OUT_FOLDER if (in_p and in_p.is_dir()) else OUT_IMAGE
 
         if kind == OUT_FOLDER:
-            p = filedialog.askdirectory(title="Select output folder", initialdir=initial)
+            p = filedialog.askdirectory(title=t("dlg.select_out_folder"), initialdir=initial)
         elif kind == OUT_PDF:
-            p = filedialog.asksaveasfilename(title="Save PDF as", defaultextension=".pdf",
-                                             filetypes=[("PDF", "*.pdf")], initialdir=initial)
+            p = filedialog.asksaveasfilename(title=t("dlg.save_pdf"), defaultextension=".pdf",
+                                             filetypes=[(t("filetype.pdf"), "*.pdf")],
+                                             initialdir=initial)
         elif kind == OUT_DOCX:
-            p = filedialog.asksaveasfilename(title="Save Word document as", defaultextension=".docx",
-                                             filetypes=[("Word", "*.docx")], initialdir=initial)
+            p = filedialog.asksaveasfilename(title=t("dlg.save_docx"), defaultextension=".docx",
+                                             filetypes=[(t("filetype.word"), "*.docx")],
+                                             initialdir=initial)
         elif kind == OUT_TXT:
-            p = filedialog.asksaveasfilename(title="Save text file as", defaultextension=".txt",
-                                             filetypes=[("Text", "*.txt")], initialdir=initial)
+            p = filedialog.asksaveasfilename(title=t("dlg.save_txt"), defaultextension=".txt",
+                                             filetypes=[(t("filetype.text"), "*.txt")],
+                                             initialdir=initial)
         elif kind == OUT_IMAGE:
             if spec.key == "image_to_image":
                 ext = "." + self.batch_img_fmt_var.get().lower()
-                p = filedialog.asksaveasfilename(title="Save image as", defaultextension=ext,
-                                                 filetypes=[("Image", "*" + ext)], initialdir=initial)
+                p = filedialog.asksaveasfilename(title=t("dlg.save_image"), defaultextension=ext,
+                                                 filetypes=[(t("filetype.image"), "*" + ext)],
+                                                 initialdir=initial)
             else:
                 p = filedialog.asksaveasfilename(
-                    title="Save image as", defaultextension=".png",
+                    title=t("dlg.save_image"), defaultextension=".png",
                     filetypes=[("PNG", "*.png"), ("JPG", "*.jpg")], initialdir=initial)
 
         if p:
@@ -834,7 +879,7 @@ class App(BaseTk):
     def _copy_log(self):
         self.clipboard_clear()
         self.clipboard_append(self.log.get("1.0", "end").strip())
-        self._log("Log copied to clipboard.", kind="muted")
+        self._log(t("log.copied"), kind="muted")
 
     # ---------------------------------------------------------- run flow --
 
@@ -846,7 +891,7 @@ class App(BaseTk):
 
     def _cancel(self):
         self.cancel_event.set()
-        self._log("Cancel requested…", kind="muted")
+        self._log(t("log.cancel_requested"), kind="muted")
 
     def _open_output(self):
         out = self.out_path.get().strip().strip('"')
@@ -862,22 +907,22 @@ class App(BaseTk):
         in_p: Path | None = None
         if spec.input_kind == IN_NONE:
             if not self.merge_list:
-                raise ConversionError("The merge list is empty — add some PDFs first.")
+                raise ConversionError(t("err.merge_empty"))
         else:
             if not in_txt:
-                raise ConversionError("Choose an input path.")
+                raise ConversionError(t("err.input_required"))
             in_p = Path(in_txt)
             if not in_p.exists():
-                raise ConversionError(f"Input path does not exist:\n{in_p}")
+                raise ConversionError(t("err.input_missing", path=in_p))
             if spec.input_kind == IN_DOCX and in_p.suffix.lower() != ".docx":
-                raise ConversionError("Input must be a .docx file.")
+                raise ConversionError(t("err.input_docx"))
             if spec.input_kind == IN_PDF and in_p.suffix.lower() != ".pdf":
-                raise ConversionError("Input must be a .pdf file.")
+                raise ConversionError(t("err.input_pdf"))
             if spec.input_kind == IN_FOLDER and not in_p.is_dir():
-                raise ConversionError("Input must be a folder.")
+                raise ConversionError(t("err.input_folder"))
 
         if not out_txt:
-            raise ConversionError("Choose an output path.")
+            raise ConversionError(t("err.output_required"))
         out_p = Path(out_txt)
 
         kind = spec.output_kind
@@ -886,10 +931,7 @@ class App(BaseTk):
 
         if kind == OUT_FOLDER:
             if out_p.suffix:
-                raise ConversionError(
-                    f"This conversion writes many files, so the output must be a folder.\n"
-                    f"'{out_p.name}' looks like a file."
-                )
+                raise ConversionError(t("err.output_folder_expected", name=out_p.name))
         elif kind == OUT_PDF:
             out_p = out_p.with_suffix(".pdf")
         elif kind == OUT_DOCX:
@@ -902,23 +944,24 @@ class App(BaseTk):
                 if out_p.suffix.lower() != want:
                     out_p = out_p.with_suffix(want)
             elif out_p.suffix.lower() not in (".png", ".jpg", ".jpeg"):
-                raise ConversionError("Output image must be .png or .jpg")
+                raise ConversionError(t("err.output_image_ext"))
 
         # numeric sanity for the options this mode actually uses
         if OPT_RENDER in spec.options:
-            dpi = self._as_int(self.dpi_var.get(), "DPI")
+            dpi = self._as_int(self.dpi_var.get(), t("opt.dpi"))
             if not (72 <= dpi <= 600):
-                raise ConversionError("DPI must be between 72 and 600.")
+                raise ConversionError(t("err.dpi_range"))
             if self.fmt_var.get().lower() not in ("png", "jpg"):
-                raise ConversionError("Format must be png or jpg.")
+                raise ConversionError(t("err.format_png_jpg"))
         if OPT_IMAGE_OUT in spec.options:
             if self.batch_img_fmt_var.get().lower() not in OUT_IMAGE_FORMATS:
-                raise ConversionError(f"Choose an output format from: {', '.join(OUT_IMAGE_FORMATS)}")
-            self._as_int(self.resize_quality_var.get(), "Quality")
+                raise ConversionError(t("err.choose_out_format",
+                                        formats=", ".join(OUT_IMAGE_FORMATS)))
+            self._as_int(self.resize_quality_var.get(), t("opt.quality"))
             if self.resize_max_var.get().strip():
-                self._as_int(self.resize_max_var.get(), "Max size")
+                self._as_int(self.resize_max_var.get(), t("opt.max_size"))
         if OPT_COMPRESS in spec.options and self.compress_mode_var.get() == "rebuild":
-            self._as_int(self.compress_dpi_var.get(), "Rebuild DPI")
+            self._as_int(self.compress_dpi_var.get(), t("opt.rebuild_dpi"))
 
         return spec, in_p, out_p
 
@@ -927,7 +970,7 @@ class App(BaseTk):
         try:
             return int(str(text).strip())
         except ValueError as exc:
-            raise ConversionError(f"{field} must be a whole number (got '{text}').") from exc
+            raise ConversionError(t("err.whole_number", field=field, value=text)) from exc
 
     def _confirm_overwrite(self, out_p: Path, is_folder_output: bool) -> bool:
         if not self.confirm_overwrite_var.get():
@@ -940,36 +983,37 @@ class App(BaseTk):
                     has_any = True
                 if has_any:
                     return messagebox.askyesno(
-                        "Folder is not empty",
-                        f"{out_p}\n\nExisting files with the same names will be replaced. Continue?")
+                        t("dlg.folder_not_empty"),
+                        t("dlg.folder_not_empty_body", path=out_p))
             return True
         if out_p.exists() and out_p.is_file():
-            return messagebox.askyesno("Overwrite file?", f"{out_p}\n\nReplace this file?")
+            return messagebox.askyesno(t("dlg.overwrite_file"),
+                                       t("dlg.overwrite_file_body", path=out_p))
         return True
 
     def _run(self):
         try:
             spec, in_p, out_p = self._resolve_paths()
         except ConversionError as e:
-            self.status.set_state("error", "Check settings")
+            self.status.set_state("error", t("status.check_settings"))
             self._log(str(e), kind="err")
-            messagebox.showerror("Cannot run", str(e))
+            messagebox.showerror(t("dlg.cannot_run"), str(e))
             return
 
         folder_output = not out_p.suffix
         if not self._confirm_overwrite(out_p, folder_output):
-            self.status.set_state("idle", "Cancelled")
+            self.status.set_state("idle", t("status.cancelled"))
             return
 
         self.out_path.set(str(out_p))
         self.cancel_event.clear()
         self.progress["value"] = 0
         self.progress["maximum"] = 100
-        self.status.set_state("working", "Working…")
+        self.status.set_state("working", t("status.working"))
         self.detail.configure(text=spec.title)
         self._set_working(True)
         self._persist_settings()
-        self._log(f"Starting: {spec.title}", kind="info")
+        self._log(t("log.starting", title=spec.title), kind="info")
 
         params = self._snapshot_params(spec, in_p, out_p)
         self.worker_thread = threading.Thread(target=self._worker, args=(params,), daemon=True)
@@ -1024,6 +1068,10 @@ class App(BaseTk):
         try:
             if key == "pdf_to_word":
                 core.pdf_to_word(in_p, out_p, page_range=p["page_range"], **cb)
+
+            elif key == "images_to_word":
+                core.images_to_word(in_p, out_p, recursive=p["recursive"],
+                                    sort_mode=p["sort_mode"], **cb)
 
             elif key == "word_to_pdf":
                 core.word_to_pdf(in_p, out_p, log_cb=log_cb)
@@ -1086,14 +1134,15 @@ class App(BaseTk):
                                                  sort_mode=p["sort_mode"], **cb)
 
             elif key == "batch_word_pdf":
-                core.batch_word_convert(in_p, out_p, "pdf", p["dpi"], p["fmt"], p["jpg_quality"], **cb)
+                core.batch_word_convert(in_p, out_p, "pdf", p["dpi"], p["fmt"],
+                                        p["jpg_quality"], **cb)
 
             elif key == "batch_word_images":
                 core.batch_word_convert(in_p, out_p, "images", p["dpi"], p["fmt"],
                                         p["jpg_quality"], **cb)
 
             else:
-                raise ConversionError(f"Unknown mode: {key}")
+                raise ConversionError(t("err.unknown_mode", key=key))
 
             self.ui_queue.put(("done", str(out_p)))
 
@@ -1119,15 +1168,15 @@ class App(BaseTk):
                 elif tag == "progress":
                     done, total = msg[1], max(1, msg[2])
                     self.progress["value"] = int((done / total) * 100)
-                    self.detail.configure(text=f"{done} of {total}")
+                    self.detail.configure(text=t("status.progress", done=done, total=total))
 
                 elif tag == "done":
                     self._set_working(False)
                     self.progress["value"] = 100
-                    self.status.set_state("done", "Finished")
+                    self.status.set_state("done", t("status.finished"))
                     self.detail.configure(text=msg[1])
                     self.btn_open.config(state="normal")
-                    self._log(f"Finished → {msg[1]}", kind="ok")
+                    self._log(t("log.finished", path=msg[1]), kind="ok")
                     if self.open_output_after_run_var.get():
                         try:
                             self._open_output()
@@ -1137,16 +1186,16 @@ class App(BaseTk):
                 elif tag == "cancelled":
                     self._set_working(False)
                     self.progress["value"] = 0
-                    self.status.set_state("idle", "Cancelled")
+                    self.status.set_state("idle", t("status.cancelled"))
                     self.detail.configure(text="")
-                    self._log("Cancelled.", kind="muted")
+                    self._log(t("log.cancelled"), kind="muted")
 
                 elif tag == "error":
                     self._set_working(False)
-                    self.status.set_state("error", "Failed")
-                    self.detail.configure(text="see Activity Log")
+                    self.status.set_state("error", t("status.failed"))
+                    self.detail.configure(text=t("status.see_log"))
                     self._log(msg[1], kind="err")
-                    messagebox.showerror("Conversion failed", msg[1])
+                    messagebox.showerror(t("dlg.failed"), msg[1])
 
         except queue.Empty:
             pass

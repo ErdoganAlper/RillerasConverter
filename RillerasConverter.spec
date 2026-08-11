@@ -13,13 +13,14 @@ hiddenimports = [
     'rilleras',
     'rilleras.app',
     'rilleras.core',
+    'rilleras.i18n',
     'rilleras.modes',
     'rilleras.settings',
     'rilleras.theme',
 ]
 
 # These pull in data files / native libs that static analysis alone misses.
-for _pkg in ('pdf2docx', 'docx2pdf', 'tkinterdnd2', 'img2pdf'):
+for _pkg in ('pdf2docx', 'docx', 'docx2pdf', 'tkinterdnd2', 'img2pdf'):
     try:
         _d, _b, _h = collect_all(_pkg)
         datas += _d

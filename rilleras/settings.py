@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 
+from . import i18n
 from .core import PRESETS
 
 
@@ -26,6 +27,7 @@ def resource_path(name: str) -> Path:
 SETTINGS_FILE = app_dir() / "settings.json"
 
 DEFAULT_SETTINGS = {
+    "language": i18n.DEFAULT_LANGUAGE,
     "remember_paths": True,
     "open_output_after_run": False,
     "confirm_overwrite": True,
@@ -68,6 +70,8 @@ def load_settings() -> dict:
 
     if merged.get("last_preset") not in PRESETS:
         merged["last_preset"] = list(PRESETS.keys())[0]
+    if merged.get("language") not in i18n.LANGUAGES:
+        merged["language"] = i18n.DEFAULT_LANGUAGE
     if not isinstance(merged.get("recent_inputs"), list):
         merged["recent_inputs"] = []
     try:

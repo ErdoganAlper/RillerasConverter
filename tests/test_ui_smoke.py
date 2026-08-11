@@ -81,14 +81,14 @@ def test_every_mode_selectable(app):
 
 def test_group_heading_shows_title_and_subtitle(app):
     """The panel heading must track the selected group, subtitle included."""
-    from rilleras.modes import GROUP_PDF, GROUP_TITLES
+    from rilleras.modes import GROUP_PDF, group_heading
 
     app._select_view(GROUP_PDF)
     app.update_idletasks()
 
     header = app.mode_panel.winfo_children()[0]
     texts = [w.cget("text") for w in header.winfo_children() if isinstance(w, tk.Label)]
-    title, subtitle = GROUP_TITLES[GROUP_PDF]
+    title, subtitle = group_heading(GROUP_PDF)
 
     assert title in texts
     assert subtitle in texts
@@ -249,6 +249,69 @@ def test_wrong_input_type_is_rejected(app, tmp_path):
 
     with pytest.raises(ConversionError):
         app._resolve_paths()
+
+
+def test_language_switch_relabels_the_whole_window(app):
+    """Switching language rebuilds the UI; every visible label must follow."""
+    from rilleras import i18n
+
+    app._select_view("main")
+    app._on_mode_card_clicked("pdf_to_word")
+    app.update_idletasks()
+    assert app.btn_run.cget("text") == "Run conversion"
+
+    try:
+        app.language_var.set(i18n.LANGUAGES["tr"])
+        app._on_language_changed()
+        app.update_idletasks()
+
+        assert i18n.get_language() == "tr"
+        assert app.btn_run.cget("text") == "Dönüştürmeyi başlat"
+        assert app._nav_buttons["settings"].label.cget("text") == "Ayarlar"
+        # the mode tiles are rebuilt too, and selection survives
+        assert app.mode_var.get() == "pdf_to_word"
+        assert app._mode_cards["pdf_to_word"]._selected
+        assert "Girdi PDF" in app.mode_hint.cget("text")
+    finally:
+        app.language_var.set(i18n.LANGUAGES["en"])
+        app._on_language_changed()
+        app.update_idletasks()
+
+    assert app.btn_run.cget("text") == "Run conversion"
+
+
+def test_language_switch_preserves_user_state(app):
+    from rilleras import i18n
+    from pathlib import Path
+
+    app._select_view("pdf")
+    app._on_mode_card_clicked("merge_pdfs")
+    app.merge_list = [Path("one.pdf"), Path("two.pdf")]
+    app._merge_refresh()
+    app.page_range_var.set("2-5")
+
+    try:
+        app.language_var.set(i18n.LANGUAGES["tr"])
+        app._on_language_changed()
+        app.update_idletasks()
+
+        assert [p.name for p in app.merge_list] == ["one.pdf", "two.pdf"]
+        assert app.merge_box.size() == 2          # rebuilt list widget repopulated
+        assert app.page_range_var.get() == "2-5"  # Tk variables survive the rebuild
+    finally:
+        app.merge_list = []
+        app.language_var.set(i18n.LANGUAGES["en"])
+        app._on_language_changed()
+        app.update_idletasks()
+
+
+def test_images_to_word_mode_is_wired_up(app):
+    app._select_view("main")
+    app._on_mode_card_clicked("images_to_word")
+    app.update_idletasks()
+
+    assert app.mode_var.get() == "images_to_word"
+    assert "Word" in app.mode_hint.cget("text")
 
 
 def test_preset_updates_render_settings(app):

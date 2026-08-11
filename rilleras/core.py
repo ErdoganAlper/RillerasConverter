@@ -15,11 +15,14 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 import fitz  # PyMuPDF
 import img2pdf
 from PIL import Image
+
+from .i18n import t
 
 # ---------------------------------------------------------------- constants --
 
@@ -51,7 +54,9 @@ class Cancelled(ConversionError):
 
 def natural_key(s: str):
     """Sort key so 'page2' comes before 'page10'."""
-    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
+    # NB: avoid binding the name `t` here — it is the translation function.
+    return [int(chunk) if chunk.isdigit() else chunk.lower()
+            for chunk in re.split(r"(\d+)", s)]
 
 
 def ensure_dir(p: Path):
@@ -76,12 +81,12 @@ def _check_cancel(cancel_event):
 
 def parse_page_range(text: str, max_page: int) -> list[int]:
     """Turn '1-3,7,10-' into a sorted list of 0-based page indexes."""
-    t = (text or "").strip().lower()
-    if t in ("", "all", "*"):
+    raw = (text or "").strip().lower()
+    if raw in ("", "all", "*"):
         return list(range(max_page))
 
     out: set[int] = set()
-    for part in [p.strip() for p in t.split(",") if p.strip()]:
+    for part in [p.strip() for p in raw.split(",") if p.strip()]:
         try:
             if "-" in part:
                 a, b = part.split("-", 1)
@@ -96,9 +101,7 @@ def parse_page_range(text: str, max_page: int) -> list[int]:
                 if 1 <= p <= max_page:
                     out.add(p - 1)
         except ValueError as exc:
-            raise ConversionError(
-                f"Could not read page range '{part}'. Use formats like: all, 1-3,7,10-"
-            ) from exc
+            raise ConversionError(t("err.page_range", part=part)) from exc
     return sorted(out)
 
 
@@ -121,18 +124,18 @@ def word_backend_available() -> tuple[bool, str]:
     traceback into a sentence the user can act on.
     """
     if os.name != "nt":
-        return False, "Word conversion needs Microsoft Word on Windows."
+        return False, t("why.not_windows")
     try:
         import docx2pdf  # noqa: F401
     except Exception:
-        return False, "The 'docx2pdf' package is not installed."
+        return False, t("why.no_docx2pdf")
     try:
         import win32com.client  # type: ignore
 
         win32com.client.Dispatch("Word.Application").Quit()
-        return True, "Microsoft Word detected."
+        return True, t("why.word_ok")
     except Exception:
-        return False, "Microsoft Word does not appear to be installed."
+        return False, t("why.no_word")
 
 
 # --------------------------------------------------------------- image save --
@@ -183,13 +186,11 @@ def pil_save_image(im: Image.Image, out_path: Path, out_fmt: str, quality: int =
             # DDS write support is missing from some Pillow builds.
             im.save(out_path, "DDS")
         else:
-            raise ConversionError(f"Unsupported output format: {out_fmt}")
+            raise ConversionError(t("err.unsupported_format", fmt=out_fmt))
     except ConversionError:
         raise
     except Exception as e:
-        raise ConversionError(
-            f"Failed saving as .{out_fmt}. Your Pillow build may not support it.\nDetails: {e}"
-        ) from e
+        raise ConversionError(t("err.save_failed", fmt=out_fmt, details=e)) from e
 
 
 # --------------------------------------------------------------- image → * --
@@ -199,13 +200,13 @@ def image_to_image(input_path: Path, out_path: Path, out_fmt: str,
                    progress_cb=None, cancel_event=None, log_cb=None):
     out_fmt = out_fmt.lower()
     if out_fmt not in OUT_IMAGE_FORMATS:
-        raise ConversionError(f"Choose output format from: {', '.join(OUT_IMAGE_FORMATS)}")
+        raise ConversionError(t("err.choose_out_format", formats=", ".join(OUT_IMAGE_FORMATS)))
 
     if input_path.is_dir():
         ensure_dir(out_path)
         imgs = collect_images(input_path, recursive)
         if not imgs:
-            raise ConversionError("No images found.")
+            raise ConversionError(t("err.no_images"))
 
         total = len(imgs)
         for i, p in enumerate(imgs, start=1):
@@ -217,12 +218,12 @@ def image_to_image(input_path: Path, out_path: Path, out_fmt: str,
                 out_file = out_path / f"{p.stem}.{out_fmt}"
                 pil_save_image(im, out_file, out_fmt, quality=quality)
             if log_cb:
-                log_cb(f"Saved: {out_file}")
+                log_cb(t("msg.saved", path=out_file))
             if progress_cb:
                 progress_cb(i, total)
     else:
         if input_path.suffix.lower() not in IMAGE_EXTS:
-            raise ConversionError("Input must be an image file.")
+            raise ConversionError(t("err.input_image"))
         out_path.parent.mkdir(parents=True, exist_ok=True)
         _check_cancel(cancel_event)
 
@@ -233,7 +234,7 @@ def image_to_image(input_path: Path, out_path: Path, out_fmt: str,
             pil_save_image(im, out_path, out_fmt, quality=quality)
 
         if log_cb:
-            log_cb(f"Saved: {out_path}")
+            log_cb(t("msg.saved", path=out_path))
         if progress_cb:
             progress_cb(1, 1)
 
@@ -253,29 +254,103 @@ def batch_image_resize(in_dir: Path, out_dir: Path, out_fmt: str, max_size: int,
                    log_cb=log_cb)
 
 
-def images_to_pdf(input_path: Path, out_pdf: Path, recursive: bool, sort_mode: str,
-                  progress_cb=None, cancel_event=None, log_cb=None):
-    images = collect_images(input_path, recursive)
-    if not images:
-        raise ConversionError("No images found.")
-
+def sort_images(images: list[Path], sort_mode: str) -> list[Path]:
+    """Order pages the way the user asked. ``collect_images`` sorts naturally."""
     if sort_mode == "mtime":
         images.sort(key=lambda p: p.stat().st_mtime)
     elif sort_mode == "name":
         images.sort(key=lambda p: p.name.lower())
+    return images
+
+
+def images_to_pdf(input_path: Path, out_pdf: Path, recursive: bool, sort_mode: str,
+                  progress_cb=None, cancel_event=None, log_cb=None):
+    images = collect_images(input_path, recursive)
+    if not images:
+        raise ConversionError(t("err.no_images"))
+    sort_images(images, sort_mode)
 
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     if log_cb:
-        log_cb(f"Found {len(images)} images. Creating PDF...")
+        log_cb(t("msg.found_images", count=len(images)))
     _check_cancel(cancel_event)
 
     with open(out_pdf, "wb") as f:
         f.write(img2pdf.convert([str(p) for p in images]))
 
     if log_cb:
-        log_cb(f"Created: {out_pdf}")
+        log_cb(t("msg.created", path=out_pdf))
     if progress_cb:
         progress_cb(1, 1)
+
+
+#: Formats python-docx can embed directly; anything else is converted first.
+_DOCX_SAFE_FORMATS = {"PNG", "JPEG", "GIF", "BMP", "TIFF"}
+
+
+def images_to_word(input_path: Path, out_docx: Path, recursive: bool, sort_mode: str,
+                   progress_cb=None, cancel_event=None, log_cb=None):
+    """Build a .docx with one image per page, scaled to fit inside the margins."""
+    try:
+        from docx import Document
+        from docx.shared import Emu
+    except Exception as e:
+        raise ConversionError(t("err.pythondocx_missing", details=e)) from e
+
+    images = collect_images(input_path, recursive)
+    if not images:
+        raise ConversionError(t("err.no_images"))
+    sort_images(images, sort_mode)
+
+    if out_docx.suffix.lower() != ".docx":
+        out_docx = out_docx.with_suffix(".docx")
+    out_docx.parent.mkdir(parents=True, exist_ok=True)
+
+    doc = Document()
+    section = doc.sections[0]
+    avail_w = section.page_width - section.left_margin - section.right_margin
+    avail_h = section.page_height - section.top_margin - section.bottom_margin
+
+    total = len(images)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        for i, p in enumerate(images, start=1):
+            _check_cancel(cancel_event)
+
+            with Image.open(p) as im:
+                im.load()
+                px_w, px_h = im.size
+                if (im.format or "").upper() in _DOCX_SAFE_FORMATS:
+                    embed = p
+                else:
+                    # e.g. WEBP, which Word cannot embed
+                    embed = tmp_dir / f"{i:04d}.png"
+                    (im if im.mode in ("RGB", "RGBA", "L") else im.convert("RGB")).save(embed, "PNG")
+
+            if px_w <= 0 or px_h <= 0:
+                raise ConversionError(t("err.image_no_size", path=p))
+
+            # Fit inside the printable area while keeping the aspect ratio.
+            aspect = px_h / px_w
+            width = avail_w
+            height = int(width * aspect)
+            if height > avail_h:
+                height = avail_h
+                width = int(height / aspect)
+
+            doc.add_picture(str(embed), width=Emu(int(width)), height=Emu(int(height)))
+            if i < total:
+                doc.add_page_break()
+
+            if log_cb:
+                log_cb(t("msg.added", path=p.name))
+            if progress_cb:
+                progress_cb(i, total)
+
+        doc.save(str(out_docx))
+
+    if log_cb:
+        log_cb(t("msg.created", path=out_docx))
 
 
 def images_to_pdf_per_subfolder(in_dir: Path, out_dir: Path, recursive: bool, sort_mode: str,
@@ -283,7 +358,7 @@ def images_to_pdf_per_subfolder(in_dir: Path, out_dir: Path, recursive: bool, so
     ensure_dir(out_dir)
     subfolders = [p for p in in_dir.iterdir() if p.is_dir()]
     if not subfolders:
-        raise ConversionError("No subfolders found. Put images into subfolders.")
+        raise ConversionError(t("err.no_subfolders"))
 
     total = len(subfolders)
     for i, folder in enumerate(subfolders, start=1):
@@ -314,7 +389,7 @@ def pdf_to_images(pdf_path: Path, out_dir: Path, dpi: int, fmt: str, jpg_quality
 
         total = len(page_indexes)
         if total == 0:
-            raise ConversionError("No pages selected (or no pages with images).")
+            raise ConversionError(t("err.no_pages_or_images"))
 
         mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
         for i, pno in enumerate(page_indexes, start=1):
@@ -329,7 +404,7 @@ def pdf_to_images(pdf_path: Path, out_dir: Path, dpi: int, fmt: str, jpg_quality
                 pix.save(str(out_path))
 
             if log_cb:
-                log_cb(f"Saved: {out_path}")
+                log_cb(t("msg.saved", path=out_path))
             if progress_cb:
                 progress_cb(i, total)
 
@@ -339,7 +414,7 @@ def pdf_to_long_image(pdf_path: Path, out_image: Path, dpi: int, fmt: str, jpg_q
     with fitz.open(pdf_path) as doc:
         page_indexes = parse_page_range(page_range, len(doc))
         if not page_indexes:
-            raise ConversionError("No pages selected.")
+            raise ConversionError(t("err.no_pages"))
 
         mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
         imgs = []
@@ -366,7 +441,7 @@ def pdf_to_long_image(pdf_path: Path, out_image: Path, dpi: int, fmt: str, jpg_q
         stitched.save(out_image, "PNG")
 
     if log_cb:
-        log_cb(f"Created: {out_image}")
+        log_cb(t("msg.created", path=out_image))
 
 
 def pdf_to_text(pdf_path: Path, out_txt: Path, page_range="all",
@@ -383,7 +458,7 @@ def pdf_to_text(pdf_path: Path, out_txt: Path, page_range="all",
                 if progress_cb:
                     progress_cb(i, total)
     if log_cb:
-        log_cb(f"Created: {out_txt}")
+        log_cb(t("msg.created", path=out_txt))
 
 
 class _Pdf2DocxLogBridge(logging.Handler):
@@ -426,11 +501,7 @@ def pdf_to_word(pdf_path: Path, out_docx: Path, page_range="all",
     try:
         from pdf2docx import Converter
     except Exception as e:
-        raise ConversionError(
-            "PDF → Word needs the 'pdf2docx' package.\n"
-            "Install it with:  pip install pdf2docx\n"
-            f"Details: {e}"
-        ) from e
+        raise ConversionError(t("err.pdf2docx_missing", details=e)) from e
 
     if out_docx.suffix.lower() != ".docx":
         out_docx = out_docx.with_suffix(".docx")
@@ -443,14 +514,13 @@ def pdf_to_word(pdf_path: Path, out_docx: Path, page_range="all",
         has_text = any(doc[i].get_text("text").strip() for i in range(min(3, total_pages)))
     pages = parse_page_range(page_range, total_pages)
     if not pages:
-        raise ConversionError("No pages selected.")
+        raise ConversionError(t("err.no_pages"))
 
     if not has_text and log_cb:
-        log_cb("Note: this PDF has no text layer (likely a scan). "
-               "Output will contain page images, not editable text.")
+        log_cb(t("msg.pdf_no_text_layer"))
 
     if log_cb:
-        log_cb(f"Converting {len(pages)} page(s) to Word — this can take a while...")
+        log_cb(t("msg.converting_pages", count=len(pages)))
 
     bridge = _Pdf2DocxLogBridge(len(pages), progress_cb=progress_cb, log_cb=log_cb)
     pdf2docx_logger = logging.getLogger("pdf2docx")
@@ -467,7 +537,7 @@ def pdf_to_word(pdf_path: Path, out_docx: Path, page_range="all",
     except Cancelled:
         raise
     except Exception as e:
-        raise ConversionError(f"PDF → Word failed: {e}") from e
+        raise ConversionError(t("err.pdf_to_word_failed", details=e)) from e
     finally:
         if cv is not None:
             try:
@@ -481,7 +551,7 @@ def pdf_to_word(pdf_path: Path, out_docx: Path, page_range="all",
     if progress_cb:
         progress_cb(len(pages), len(pages))
     if log_cb:
-        log_cb(f"Created: {out_docx}")
+        log_cb(t("msg.created", path=out_docx))
 
 
 # ------------------------------------------------------------- PDF surgery --
@@ -489,7 +559,7 @@ def pdf_to_word(pdf_path: Path, out_docx: Path, page_range="all",
 def merge_pdfs(pdf_files: list[Path], out_pdf: Path,
                progress_cb=None, cancel_event=None, log_cb=None):
     if not pdf_files:
-        raise ConversionError("No PDFs selected.")
+        raise ConversionError(t("err.no_pdfs"))
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
 
     merged = fitz.open()
@@ -500,7 +570,7 @@ def merge_pdfs(pdf_files: list[Path], out_pdf: Path,
             with fitz.open(p) as src:
                 merged.insert_pdf(src)
             if log_cb:
-                log_cb(f"Added: {p}")
+                log_cb(t("msg.added", path=p))
             if progress_cb:
                 progress_cb(i, total)
         merged.save(out_pdf)
@@ -508,7 +578,7 @@ def merge_pdfs(pdf_files: list[Path], out_pdf: Path,
         merged.close()
 
     if log_cb:
-        log_cb(f"Created: {out_pdf}")
+        log_cb(t("msg.created", path=out_pdf))
 
 
 def split_pdf(pdf_path: Path, out_dir: Path, mode: str, ranges: str,
@@ -526,23 +596,23 @@ def split_pdf(pdf_path: Path, out_dir: Path, mode: str, ranges: str,
                 new.save(out)
                 new.close()
                 if log_cb:
-                    log_cb(f"Saved: {out}")
+                    log_cb(t("msg.saved", path=out))
                 if progress_cb:
                     progress_cb(i + 1, n)
         else:
             blocks = [b.strip() for b in ranges.split(",") if b.strip()]
             if not blocks:
-                raise ConversionError("Provide ranges like 1-3,4-7")
+                raise ConversionError(t("err.ranges_required"))
             total = len(blocks)
             for idx, b in enumerate(blocks, start=1):
                 _check_cancel(cancel_event)
                 if "-" not in b:
-                    raise ConversionError("Ranges must be like 1-3,4-7")
+                    raise ConversionError(t("err.ranges_format"))
                 a, c = b.split("-", 1)
                 try:
                     a, c = int(a.strip()), int(c.strip())
                 except ValueError as exc:
-                    raise ConversionError(f"Could not read range '{b}'.") from exc
+                    raise ConversionError(t("err.range_unreadable", block=b)) from exc
                 a, c = max(1, a), min(n, c)
                 if a > c:
                     continue
@@ -552,7 +622,7 @@ def split_pdf(pdf_path: Path, out_dir: Path, mode: str, ranges: str,
                 new.save(out)
                 new.close()
                 if log_cb:
-                    log_cb(f"Saved: {out}")
+                    log_cb(t("msg.saved", path=out))
                 if progress_cb:
                     progress_cb(idx, total)
 
@@ -571,7 +641,7 @@ def rotate_pdf(pdf_path: Path, out_pdf: Path, degrees: int, page_range="all",
                 progress_cb(i, total)
         doc.save(out_pdf)
     if log_cb:
-        log_cb(f"Created: {out_pdf}")
+        log_cb(t("msg.created", path=out_pdf))
 
 
 def compress_pdf_clean(pdf_path: Path, out_pdf: Path, log_cb=None):
@@ -579,7 +649,7 @@ def compress_pdf_clean(pdf_path: Path, out_pdf: Path, log_cb=None):
     with fitz.open(pdf_path) as doc:
         doc.save(out_pdf, garbage=4, deflate=True, clean=True)
     if log_cb:
-        log_cb(f"Created (clean/deflate): {out_pdf}")
+        log_cb(t("msg.created_clean", path=out_pdf))
 
 
 def compress_pdf_rebuild(pdf_path: Path, out_pdf: Path, dpi: int,
@@ -602,7 +672,7 @@ def compress_pdf_rebuild(pdf_path: Path, out_pdf: Path, dpi: int,
     finally:
         out.close()
     if log_cb:
-        log_cb(f"Created (rebuild at {dpi} dpi): {out_pdf}")
+        log_cb(t("msg.created_rebuild", dpi=dpi, path=out_pdf))
 
 
 # ---------------------------------------------------------------- Word → * --
@@ -610,20 +680,16 @@ def compress_pdf_rebuild(pdf_path: Path, out_pdf: Path, dpi: int,
 def word_to_pdf(docx_path: Path, out_pdf: Path, log_cb=None):
     ok, why = word_backend_available()
     if not ok:
-        raise ConversionError(
-            f"Word → PDF is unavailable. {why}\n\n"
-            "This conversion automates Microsoft Word, so Word must be installed "
-            "and licensed on this PC."
-        )
+        raise ConversionError(t("err.word_unavailable", why=why))
 
     from docx2pdf import convert as docx2pdf_convert
 
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     if log_cb:
-        log_cb("Word → PDF (driving Microsoft Word)...")
+        log_cb(t("msg.word_to_pdf"))
     docx2pdf_convert(str(docx_path), str(out_pdf))
     if log_cb:
-        log_cb(f"Created: {out_pdf}")
+        log_cb(t("msg.created", path=out_pdf))
 
 
 def word_to_images(docx_path: Path, out_dir: Path, dpi: int, fmt: str, jpg_quality: int,
@@ -648,7 +714,7 @@ def batch_word_convert(in_dir: Path, out_dir: Path, mode: str,
     ensure_dir(out_dir)
     docs = sorted(in_dir.glob("*.docx"), key=lambda p: p.name.lower())
     if not docs:
-        raise ConversionError("No .docx files found in folder.")
+        raise ConversionError(t("err.no_docx_in_folder"))
 
     total = len(docs)
     for i, docx in enumerate(docs, start=1):

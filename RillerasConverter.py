@@ -23,6 +23,7 @@ REQUIRED = [
     ("PIL", "Pillow>=10.2.0"),
     ("img2pdf", "img2pdf>=0.5.1"),
     ("pdf2docx", "pdf2docx>=0.5.8"),
+    ("docx", "python-docx>=1.1.0"),
     ("docx2pdf", "docx2pdf>=0.1.8"),
 ]
 # Nice to have; the app degrades gracefully without it.
